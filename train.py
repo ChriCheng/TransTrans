@@ -12,7 +12,7 @@ import numpy as np
 from tqdm import tqdm
 import os
 import json
-
+PATH = 'out/'
 
 class TranslationDataset(Dataset):
     """
@@ -200,10 +200,10 @@ def train_model(src_texts, tgt_texts, num_epochs=10, batch_size=32, learning_rat
         print(f"Epoch {epoch+1}/{num_epochs}, Loss: {train_loss:.4f}")
     
     # 保存模型和词汇表
-    torch.save(model.state_dict(), 'model.pth')
-    with open('src_vocab.json', 'w', encoding='utf-8') as f:
+    torch.save(model.state_dict(), PATH+'model.pth')
+    with open(PATH+'src_vocab.json', 'w', encoding='utf-8') as f:
         json.dump(src_vocab, f, ensure_ascii=False)
-    with open('tgt_vocab.json', 'w', encoding='utf-8') as f:
+    with open(PATH+'tgt_vocab.json', 'w', encoding='utf-8') as f:
         json.dump(tgt_vocab, f, ensure_ascii=False)
     
     print("\n模型已保存!")
