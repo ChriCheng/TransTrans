@@ -1,0 +1,57 @@
+# TransTrans
+
+一个基于 PyTorch 的 Transformer 中英翻译示例项目。
+
+本项目从零实现了 Transformer 的核心模块，包括位置编码、多头注意力、前馈网络、编码器、解码器以及完整的翻译模型，并提供了一个可直接运行的训练脚本，适合用于课程作业、模型原理学习和基础实验。
+
+---
+
+## 项目简介
+
+`TransTrans` 是一个面向机器翻译入门的轻量级项目，目标是用尽量清晰的代码实现 Transformer 的核心结构，并完成一个简单的中英翻译训练流程。
+
+目前项目包含：
+
+- Transformer 核心结构实现
+- 简单的文本词表构建
+- 训练数据集封装与 DataLoader
+- 训练循环与损失计算
+- 模型参数与词表保存
+
+该项目更偏向**学习与演示**，适合作为：
+
+- Transformer 结构学习示例
+- 机器翻译课程作业基础代码
+- 后续扩展真实平行语料训练的起点
+
+---
+
+## 模型结构
+
+项目实现了标准 Transformer 的主要组成部分：
+
+- **Positional Encoding**：为序列注入位置信息
+- **Multi-Head Attention**：多头注意力机制
+- **Feed Forward Network**：前馈网络
+- **Encoder Layer / Decoder Layer**：编码器层与解码器层
+- **Encoder / Decoder**：多层堆叠结构
+- **TransformerTranslator**：完整翻译模型封装
+
+默认训练配置如下：
+
+- `d_model = 256`
+- `num_layers = 4`
+- `num_heads = 8`
+- `d_ff = 1024`
+- `dropout = 0.1`
+
+---
+
+## 项目结构
+
+```text
+TransTrans/
+├── train.py                 # 训练脚本：数据处理、训练循环、模型保存
+├── transformer_model.py     # Transformer模型实现
+├── out/                     # 训练输出目录（模型与词表）
+└── log/                     # 日志目录
