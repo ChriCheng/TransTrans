@@ -11,14 +11,14 @@ from torch.utils.data import DataLoader
 import numpy as np
 from collections import Counter
 import math
-
+PATH='out/'
 
 class TranslationEvaluator:
     """
     翻译模型评估类
     """
-    def __init__(self, model_path='model.pth', src_vocab_path='src_vocab.json', 
-                 tgt_vocab_path='tgt_vocab.json', device=None):
+    def __init__(self, model_path=PATH+'model.pth', src_vocab_path=PATH+'src_vocab.json', 
+                 tgt_vocab_path=PATH+'tgt_vocab.json', device=None):
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # 加载词汇表
@@ -325,10 +325,10 @@ def main():
     metrics = evaluator.evaluate_test_set(test_src_texts, test_tgt_texts)
     
     # 保存评估结果
-    with open('evaluation_results.json', 'w', encoding='utf-8') as f:
+    with open(PATH+'evaluation_results.json', 'w', encoding='utf-8') as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
     
-    print("\n评估结果已保存到 evaluation_results.json")
+    print("\n评估结果已保存到 out/evaluation_results.json")
 
 
 if __name__ == "__main__":
