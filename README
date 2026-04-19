@@ -1,12 +1,11 @@
 # 基于 Transformer 的中英翻译实验报告
 
+
 ## 1. 实验概述
 
-本实验围绕机器翻译任务，完成了一个基于 Transformer 思想的英译中翻译系统实现与验证。项目仓库包含模型结构文件、训练脚本、评估脚本和推理脚本，形成了从数据加载、模型微调、结果评估到单句翻译推理的完整实验流程。
+本实验围绕英译中机器翻译任务，对 `TransTrans` 项目进行了整理、分析与报告重写。结合当前可运行主流程与本地实验产物可以看出，项目最终采用的是**基于 Hugging Face 预训练 MarianMT 模型 `Helsinki-NLP/opus-mt-en-zh` 的微调方案**，并在 WMT17 英中平行语料上完成训练、评估与推理。
 
- `train.py`、`evaluate.py` 和 `inference.py` 构成了项目当前真正可运行的主实验链路，最初我尝试手搭架构，但是最后测试的结果极差，最后基于 Hugging Face 提供的预训练 MarianMT 模型 `Helsinki-NLP/opus-mt-en-zh`，在 WMT17 英中平行语料上进行微调取得了不错的结果。
-
-
+需要说明的是，我在实验初期确实尝试过手动搭建 Transformer 结构并训练，但从实际日志和结果来看，该路线在当前数据规模与训练条件下效果很差，难以作为最终展示方案。真正用于最终实验结论的，是 `train.py`、`evaluate.py` 和 `inference.py` 所构成的 MarianMT 微调主链路，MarianMT 本质上属于 Transformer 编码器—解码器翻译模型。从课程实验角度看，这种方案兼顾了 Transformer 理论基础与工程可运行性：既保留了“基于 Transformer 完成翻译任务”的实验主题，又能在有限时间和算力条件下得到较稳定、可展示的结果。
 
 ---
 
@@ -14,12 +13,12 @@
 
 本实验的主要目标如下：
 
-- 理解 Transformer 编码器—解码器结构的基本原理；
-- 掌握位置编码、多头注意力、前馈网络与掩码机制的作用；
-- 构建一个最小可运行的英译中翻译流程；
-- 完成模型训练、保存、加载、推理与评估；
+- 理解 Transformer 在机器翻译任务中的基本思想；
+- 熟悉预训练 Seq2Seq 翻译模型的微调流程；
+- 完成一个可运行的英译中训练、评估与推理闭环；
 - 观察小规模训练条件下翻译模型的收敛行为与生成效果；
-- 分析当前项目结构中“手写 Transformer 模块”和“预训练微调主链路”之间的关系，并总结其优缺点。
+- 分析早期手搭架构路线效果不佳的原因；
+- 总结当前 MarianMT 微调主链路在课程实验中的优点与局限。
 
 ---
 
@@ -27,139 +26,85 @@
 
 ### 3.1 软件环境
 
-根据项目中的 `requirement.txt` 和 `environment.yml`，本实验使用的主要软件环境如下：
 
 - Python 3.11
 - PyTorch 2.11.0
 - torchvision 0.26.0
 - torchaudio 2.11.0
 - transformers 5.5.1
+- tokenizers 0.22.2
 - datasets 4.8.4
 - sacrebleu 2.6.0
 - numpy 2.4.4
+- pandas 3.0.2
+- matplotlib 3.10.8
 - tqdm 4.67.3
 - sentencepiece 0.2.x
 - accelerate 1.x
 
-若采用 Conda，可直接使用项目中的 `environment.yml` 进行环境复现。
+其余可见项目中的 `environment.yml`
 
 ### 3.2 硬件环境
 
-项目中的评估脚本和推理脚本均采用自动设备选择机制：
+项目中的训练、评估和推理脚本均带有自动设备选择逻辑：
 
-- 若检测到 CUDA，可优先使用 GPU；
+- 若检测到 CUDA，则优先使用 GPU；
 - 若无可用 GPU，则自动回退到 CPU。
 
-因此，本项目既可以在单 GPU 环境中运行，也可以在 CPU 环境下完成功能验证，只是训练速度会明显变慢。
+因此，本项目既可在单 GPU 环境中进行快速训练与评估，也可在 CPU 环境中完成功能验证，只是训练与生成速度会明显变慢。
 
 ---
 
 ## 4. 项目结构
 
+结合当前实验主链路与本地实验输出，项目结构可整理为：
+
 ```text
 TransTrans/
-├── dataload.py                        # 数据加载与辅助处理脚本
-├── environment.yml                   # Conda 环境配置文件
-├── evaluate.py                       # 模型评估脚本
-├── inference.py                      # 单句推理脚本
-├── requirement.txt                   # Python 依赖列表
-├── train.py                          # MarianMT 微调训练脚本
-├── Transformer_Translation_Report.md # 原始课程报告
-├── log/                              # 日志记录
-└── out/                              # 训练输出目录（运行后生成）
-    ├── model/                        # 最终模型与 tokenizer
-    ├── checkpoints/                  # 训练中间检查点
-    ├── data/                         # 测试集与数据划分信息
-    ├── eval/                         # 评估结果
-    └── analysis/                     # 曲线图、训练历史、分析文件
-
+├── dataload.py                        # 数据加载与辅助脚本
+├── environment.yml                    # Conda 环境配置文件
+├── evaluate.py                        # 模型评估脚本
+├── inference.py                       # 单句推理脚本
+├── requirement.txt                    # Python 依赖列表
+├── train.py                           # MarianMT 微调训练脚本
+├── Transformer_Translation_Report.md  # 原始课程报告
+├── log/                               # 训练、评估等日志目录（运行后生成）
+└── out/                               # 实验输出目录（运行后生成）
+    ├── model/                         # 最终模型与 tokenizer
+    ├── checkpoints/                   # 训练中间检查点
+    ├── data/                          # 测试集样本、数据划分信息
+    ├── eval/                          # 评估结果
+    └── analysis/                      # 训练配置、历史记录、曲线图与分析文件
 ```
-
-当前输出目录按照用途进行了归档，运行后可重点关注以下位置：
-
-- `out/model/`：训练完成后的最终模型、tokenizer 和推理所需配置文件；
-- `out/checkpoints/`：训练过程中的阶段性 checkpoint，用于断点续训或回看中间结果；
-- `out/data/`：数据划分信息与测试集样本，例如 `split_meta.json`、`test_samples.json`；
-- `out/eval/`：离线评估结果，例如 `evaluation_results.json`；
-- `out/analysis/`：训练与验证曲线、历史指标、trainer 状态等分析产物。
-
-旧版手写 Transformer 链路遗留的 `model.pth`、`src_vocab.json`、`tgt_vocab.json` 已不再作为当前主实验流程输出，也不再写入 `out/` 根目录。
-
-
-
-## 5. 模型原理与实现
-
-### 5.1 整体结构
-
-从机器翻译任务的角度看，Transformer 是一种标准的序列到序列模型。其核心思想是使用编码器对输入序列进行表示学习，再由解码器根据编码结果和先前已生成的目标序列进行自回归生成。
-### 5.2 核心模块
-
-#### 5.2.1 位置编码
-
-由于 Transformer 不具备循环结构，也没有卷积网络那样的局部顺序归纳偏置，因此必须通过显式方式将位置信息注入模型。项目中采用的是经典的正弦—余弦位置编码方法。
-
-位置编码的优点主要体现在以下几个方面：
-
-- 不需要额外学习参数；
-- 能够为不同位置生成稳定的表示；
-- 有助于模型学习绝对位置和相对位置关系。
-
-在实现上，位置编码首先构造长度为 `max_seq_length`、维度为 `d_model` 的矩阵，然后通过正弦函数填充偶数维，通过余弦函数填充奇数维，最后与词向量相加后送入后续网络。
-
-#### 5.2.2 多头注意力
-
-多头注意力是 Transformer 的核心组成。其基本思想是：将输入分别映射为 Query、Key 和 Value，在多个不同子空间中并行计算注意力结果，最后拼接并线性变换输出。
-
-项目中的 `MultiHeadAttention` 模块包含四个线性层：
-
-- `W_q`
-- `W_k`
-- `W_v`
-- `W_o`
-
-其基本计算流程如下：
-
-1. 对输入做线性投影，得到 Q、K、V；
-2. 将隐藏维度拆分为多个 head；
-3. 对每个 head 分别计算缩放点积注意力；
-4. 将各 head 输出拼接后再做一次线性映射。
-
-这种机制的优势在于：
-
-- 可以同时关注句子中不同位置之间的依赖关系；
-- 可以从不同表示子空间中抽取不同类型的语义信息；
-- 对长距离依赖建模能力强。
-
-#### 5.2.3 因果掩码
-
-在解码阶段，模型生成当前位置的词时，不应该看到未来位置的真实词，否则就会造成信息泄漏。为此，Transformer 在解码器自注意力中引入因果掩码。
-
-项目中的 `generate_tgt_mask()` 函数同时结合了两种掩码：
-
-1. **padding mask**：忽略补齐位置；
-2. **causal mask**：只允许当前位置关注自己及之前的位置。
-
-这一步对于保证自回归生成的正确性非常关键。
-
-#### 5.2.4 前馈网络与残差归一化
-
-每个编码器层和解码器层中，除了注意力子层外，还包含一个前馈网络。前馈网络对每个位置独立施加非线性变换，以提升模型表示能力。
-
-同时，每个子层之后还包含：
-
-- 残差连接；
-- LayerNorm 层归一化；
-- Dropout。
-
-这种设计能够稳定训练过程，缓解深层网络的梯度问题。
 
 ---
 
-## 6. 数据集与预处理
+## 5. 模型原理与实现
 
-### 6.1 数据来源
+### 5.1 总体思路
 
-项目主训练脚本中，数据来自 Hugging Face `datasets` 提供的 `wmt/wmt17` 数据集，配置为 `zh-en`。但在实际训练时，脚本选择其中的英文作为源语言、中文作为目标语言，因此实际任务方向为：
+当前项目实际运行的是一个**基于预训练 Transformer 翻译模型的英译中微调系统**。整体流程可以概括为：首先从 Hugging Face 的 `wmt/wmt17` 数据集中读取 `zh-en` 配置的数据，并按实验需要取其中英文作为源语言、中文作为目标语言；随后对数据进行清洗、划分和 tokenizer 编码，再将处理后的样本送入 MarianMT 进行微调训练；训练完成后，利用保存的模型与 tokenizer 对测试集进行翻译生成，并通过 BLEU 指标及样例分析评估翻译质量。
+
+
+### 5.2 预训练 MarianMT 模型的作用
+
+MarianMT 属于典型的 `Seq2Seq Transformer` 翻译模型，其核心仍然是编码器—解码器结构：
+
+- **编码器**负责接收源语言输入，并提取上下文语义表示；
+- **解码器**在源句表示和已生成目标前缀的共同条件下，逐步预测下一个目标 token；
+- **自注意力与交叉注意力机制**使模型能够同时建模源句内部依赖与源目标之间的对齐关系；
+- **位置编码**用于向模型注入顺序信息；
+- **自回归生成机制**保证译文逐步生成，符合翻译任务的序列生成特征。
+
+与从零训练相比，预训练 MarianMT 已经在大规模平行语料上学习了较强的语言知识和翻译先验，因此在当前 8000 条样本的小规模实验中，更容易得到可观察、可展示的结果。
+
+---
+
+## 6. 数据集与数据预处理
+
+### 6.1 数据来源与任务方向
+
+项目训练数据来自 Hugging Face `datasets` 提供的 `wmt/wmt17` 数据集，配置为 `zh-en`。
 
 **English → Chinese（英译中）**
 
@@ -167,253 +112,247 @@ TransTrans/
 
 ### 6.2 数据清洗策略
 
-为了保证语料质量，训练脚本在加载原始样本后执行了一系列启发式过滤，包括：
+为了减少噪声样本对训练的影响，项目在加载原始平行语料后会执行启发式清洗，主要包括：
 
-- 去除空字符串；
+- 去除空样本；
 - 判断源句是否主要由英文构成；
-- 判断源句是否符合基本英文句子形式；
+- 判断源句是否符合基本英文句子特征；
 - 判断目标句是否主要由中文字符构成；
-- 过滤过短或过长样本；
-- 过滤中英长度比例异常的样本；
-- 去除重复样本。
+- 去除长度过短或过长的句对；
+- 去除中英文长度比例异常的句对；
+- 去除重复平行句对。
 
-这一步能够提升训练数据的一致性，减少噪声样本对模型的干扰。
 
-### 6.3 数据划分
 
-清洗完成后，数据被随机打乱，并按以下比例划分：
+### 6.3 数据集划分
+
+清洗完成后，样本会被随机打乱，并按照以下比例划分：
 
 - 训练集：80%
 - 验证集：10%
 - 测试集：10%
 
-测试集文本会被保存为 `out/data/test_samples.json`，以便后续评估脚本统一读取。
+测试集会单独保存到 `out/data/test_samples.json`，数据划分元信息则保存到 `out/data/split_meta.json`。
 
-### 6.4 分词与编码
+### 6.4 分词与编码方式
 
-由于当前主训练链路使用的是 MarianMT 预训练模型，因此不再手动构建词表，也不再自行实现 `<PAD>`、`<SOS>`、`<EOS>` 等特殊符号管理逻辑，而是直接调用预训练模型对应的 tokenizer 进行编码。
-
-训练时主要包括两部分长度约束：
+在当前主实验链路中，项目不再自行构建源语言与目标语言词表，而是直接调用 MarianMT 对应 tokenizer 完成编码。主要的长度限制为：
 
 - `max_source_length = 128`
 - `max_target_length = 160`
 
-这与项目中手写 Transformer 路线下“自行构建词表与 token 映射”的思路不同，也体现出工程化实现与教学化实现之间的差异。
+这样做的优点在于：
+
+- 避免手工词表带来的 OOV 与管理复杂度问题；
+- 与预训练模型保持一致的文本表示方式；
+- 提高训练与推理阶段的一致性。
 
 ---
 
 ## 7. 实验设置
 
-### 7.1 模型与训练配置
+### 7.1 默认训练配置
 
-根据 `train.py` 中定义的 `TrainConfig`，本实验默认采用如下设置：
+根据当前主训练脚本中的 `TrainConfig`，实验默认使用如下参数：
 
-| 参数                    | 取值                         |
-| ----------------------- | ---------------------------- |
-| `model_name`            | `Helsinki-NLP/opus-mt-en-zh` |
-| `num_examples`          | 8000                         |
-| `max_source_length`     | 128                          |
-| `max_target_length`     | 160                          |
-| `batch_size`            | 8                            |
-| `eval_batch_size`       | 8                            |
-| `learning_rate`         | 3e-5                         |
-| `num_train_epochs`      | 3                            |
-| `weight_decay`          | 0.01                         |
-| `warmup_ratio`          | 0.1                          |
-| `generation_max_length` | 160                          |
-| `generation_num_beams`  | 4                            |
-| `no_repeat_ngram_size`  | 3                            |
-| `repetition_penalty`    | 1.2                          |
-| `seed`                  | 42                           |
+| 参数 | 取值 |
+|------|------|
+| `model_name` | `Helsinki-NLP/opus-mt-en-zh` |
+| `num_examples` | 8000 |
+| `max_source_length` | 128 |
+| `max_target_length` | 160 |
+| `batch_size` | 8 |
+| `eval_batch_size` | 8 |
+| `learning_rate` | 3e-5 |
+| `num_train_epochs` | 3 |
+| `weight_decay` | 0.01 |
+| `warmup_ratio` | 0.1 |
+| `generation_max_length` | 160 |
+| `generation_num_beams` | 4 |
+| `no_repeat_ngram_size` | 3 |
+| `repetition_penalty` | 1.2 |
+| `seed` | 42 |
 
-可以看出，当前主实验流程更偏向于“在小规模样本上进行快速微调验证”，而不是训练一个大规模从零开始的翻译模型。
+
 
 ### 7.2 训练策略
 
-训练阶段使用 Hugging Face 的 `Seq2SeqTrainer`，并采用如下策略：
+当前主链路使用 Hugging Face 的 `Seq2SeqTrainer` 完成训练。训练策略主要包括：
 
-- 每个 epoch 进行一次验证；
-- 每个 epoch 保存一次模型；
-- 使用 `predict_with_generate=True` 在验证阶段直接生成文本进行评估；
-- 以 `eval_bleu` 作为选择最佳模型的指标；
-- 保留最多两个检查点；
-- 训练结束后自动加载最佳模型。
-
-这一设计使得训练、验证和模型选择流程较为完整，也适合课程实验和小型项目复现。
+- 使用 `Seq2SeqTrainingArguments` 管理训练参数；
+- 通过验证集上的 `eval_bleu` 选择最佳模型；
+- 自动保存中间检查点；
+- 记录 loss、eval_loss、eval_bleu 等训练过程指标；
+- 训练结束后保存模型、tokenizer、训练历史和 trainer 状态。
 
 ### 7.3 生成策略
 
-在评估和推理阶段，项目采用 beam search 进行生成，主要参数包括：
+在推理与评估阶段，项目主要采用 beam search 生成，相关设置包括：
 
 - `num_beams = 4`
 - `no_repeat_ngram_size = 3`
 - `repetition_penalty = 1.2`
 - `early_stopping = True`
 
-相比简单贪心解码，这样的设置能够在一定程度上减少重复生成问题，并提升翻译结果的整体可读性。
+
+
+### 7.4 输出目录与日志组织
+
+结合本地实验输出，结果文件主要被整理为如下几类：
+
+- `out/model/`：保存最终模型与 tokenizer；
+- `out/checkpoints/`：保存中间检查点；
+- `out/data/`：保存测试集与数据划分信息；
+- `out/eval/`：保存评估结果；
+- `out/analysis/`：保存运行配置、训练指标、训练历史、trainer 状态以及可视化曲线；
+- `log/`：保存训练日志、评估日志等文本记录。
+
+
 
 ---
 
-## 8. 训练流程说明
+## 8. 实验流程说明
 
-整个实验流程可以概括为以下几个步骤：
+整个实验流程可概括为以下步骤：
 
-1. 加载 MarianMT 预训练模型与对应 tokenizer；
-2. 下载并读取 WMT17 英中平行语料；
-3. 对原始样本进行语言检测、长度过滤和去重清洗；
+1. 加载 MarianMT 预训练模型及其 tokenizer；
+2. 读取 WMT17 英中平行语料；
+3. 对原始平行样本执行语言检测、长度过滤、比例过滤与去重清洗；
 4. 将数据划分为训练集、验证集和测试集；
-5. 对文本进行 tokenizer 编码；
+5. 使用 tokenizer 对源句与目标句进行编码；
 6. 使用 `Seq2SeqTrainer` 执行微调训练；
-7. 保存最佳模型、配置文件与测试集信息；
-8. 调用评估脚本对测试集进行翻译并计算 BLEU；
+7. 保存模型、tokenizer、测试集、划分信息和训练分析文件；
+8. 调用评估脚本在测试集上生成翻译并计算 Corpus BLEU；
 9. 调用推理脚本对单句输入进行翻译展示。
 
-这一流程已经构成了一个较完整的机器翻译实验闭环。
+
 
 ---
 
-## 9. 训练结果
+## 9. 实验结果与分析
 
-### 9.1 当前仓库中的结果状态
+### 9.1 数据清洗与划分结果
 
-需要如实说明的是，当前 GitHub 仓库本身并未提交 `out/analysis/train_metrics.json`、`out/eval/evaluation_results.json` 等运行结果文件，因此无法直接从仓库静态内容中读取具体训练损失曲线、验证 BLEU 数值或测试集最终得分。
+从 `log/train.log` 与 `out/data/split_meta.json` 可以看到，本次实验原始截取了 `8000` 条 WMT17 英中样本，经过语言与长度规则清洗后保留 `7535` 条，约有 `5.81%` 的样本被过滤。最终数据划分为：
 
-也就是说，项目代码已经具备完整的训练与评估功能，但仓库当前公开内容更偏向“代码实现与实验框架展示”，而不是“附带完整实验产物的结果仓库”。
-
-### 9.2 预期训练现象
-
-在当前设置下，训练样本量仅为 8000 条，训练轮数为 3，且基础模型已经具有较强的翻译能力，因此通常可以预期出现以下现象：
-
-- 训练过程较快收敛；
-- 验证 BLEU 相比未微调模型会出现一定提升或域适应效果；
-- 对常见、短句、结构清晰的英文输入能够生成较自然的中文；
-- 对长句、复杂句、低频表达的处理能力仍受数据规模限制。
-
-如果后续本地完成训练，可将 `out/analysis/train_metrics.json` 中的 loss 和验证指标补充到本节中，进一步完善实验报告。
-
----
-
-## 10. 评估结果
-
-### 10.1 评估方式
-
-项目中的 `evaluate.py` 会执行以下流程：
-
-1. 从 `out/model/` 目录加载微调后的模型和 tokenizer；
-2. 读取 `out/data/test_samples.json` 中保存的测试集；
-3. 对每条测试源句进行生成；
-4. 打印前若干条样本的源句、参考翻译和模型翻译；
-5. 使用 `sacrebleu.corpus_bleu()` 计算整个测试集的 Corpus BLEU；
-6. 将结果保存到 `out/eval/evaluation_results.json`。
-
-因此，该评估方式既保留了自动指标，也保留了可人工检查的样例输出。
-
-### 10.2 指标说明
-
-本项目当前主要使用的自动评估指标为 **Corpus BLEU**。
-
-BLEU 的基本思想是比较模型翻译结果与参考翻译在 n-gram 层面的重合程度，并结合长度惩罚项，评估整体翻译质量。其特点包括：
-
-- 适合对整个测试集进行整体评价；
-- 便于不同模型或不同实验设置之间做横向对比；
-- 对于小规模数据集上的教学实验，计算方便、解释直观。
-
-需要注意的是，BLEU 更适合宏观比较，不一定能完全反映单句可读性或语义等价性。因此，在课程实验中最好同时结合具体样例进行分析。
-
-### 10.3 当前结果说明
-
-由于当前仓库未提交实际运行产生的 `evaluation_results.json` 文件，因此本报告不伪造具体 BLEU 数值。实际实验结果应以本地运行 `evaluate.py` 后生成的 `out/eval/evaluation_results.json` 为准。
-
-如果后续已在本地得到结果，可将本节补写为如下形式：
-
-```text
-Corpus BLEU 分数: xx.xx
-测试样本数: xxxx
-```
-
-并结合若干样本翻译结果进行进一步分析。
-
----
-
-## 11. 结果分析
-
-### 11.1 当前实现的优点
-
-本项目具有以下几个明显优点：
-
-**第一，结构清晰。**
-仓库中手写 Transformer 模块和主实验脚本相对独立，既保留了对模型原理的展示，也保留了可直接运行的工程化实现。
-
-**第二，实验闭环完整。**
-从数据加载、清洗、划分，到模型训练、验证、保存，再到测试评估和单句推理，整个实验链路是完整的。
-
-**第三，复现门槛较低。**
-项目中提供了 `requirement.txt` 和 `environment.yml`，方便快速配置环境；同时 Hugging Face 框架显著简化了预训练模型的加载与训练流程。
-
-**第四，适合课程展示。**
-相较于完全从零训练一个翻译模型，基于 MarianMT 的微调更容易在有限算力和有限时间内获得可观测结果，更适合作为教学实验展示。
+- 训练集：`6028`
+- 验证集：`753`
+- 测试集：`754`
 
 
-### 11.2 当前结论
+![数据长度分布](out/analysis/data_length_distribution.png)
 
-综合来看，当前项目已经成功完成了一个小规模英译中翻译实验框架，且主链路是可运行、可评估、可推理的。虽然它并不是严格意义上“从零训练 Transformer 翻译模型”，但在课程实验的语境下，这一实现仍然具有较高的实用价值。
+上图展示了清洗后样本的长度分布情况。可以看到，大多数样本长度集中在相对合理的区间内，极端长句和极端短句占比较低，这与前面的启发式过滤策略是吻合的，也说明送入模型的数据整体较规整。
 
-一方面，手写 Transformer 文件帮助理解模型原理；另一方面，MarianMT 微调链路确保了项目能够在有限时间和资源下真正跑通并得到结果。因此，该项目已经实现了“理论学习 + 工程验证”相结合的实验目标。
+### 9.2 训练收敛情况分析
 
----
+根据 `log/train.log`、`out/analysis/training_history.json` 与 `out/analysis/train_metrics.json`，模型在 3 个 epoch 内整体呈现出较稳定的收敛趋势：
+
+- 训练总时长约为 `927.10s`，约 `15.45` 分钟；
+- `train_samples_per_second = 19.506`；
+- `train_steps_per_second = 2.44`；
+- 最终平均 `train_loss = 1.8784`。
+
+从阶段性指标变化看：
+
+- 训练初期 loss 约为 `2.346`，随后逐步下降到 `1.5x` 区间；
+- 验证集 `eval_loss` 从早期的 `2.1148` 下降到末期约 `2.0480`；
+- 验证集 `eval_bleu` 从 `35.45` 逐步提升到 `36+`，后期进入平台期。
+
+最佳验证结果出现在：
+
+- `epoch = 2.122`
+- `global_step = 1600`
+- `best_model_checkpoint = out/checkpoints/checkpoint-1600`
+- `best_metric (eval_bleu) = 36.8607`
+
+这说明当前设置下，模型在大约第 2 个 epoch 后已经学到主要翻译模式，后续训练仍有一定收益，但增幅已经明显变小，呈现出小规模微调中较典型的“前期提升明显、后期趋于平稳”现象。
+
+![训练损失曲线](out/analysis/train_loss_curve.png)
+
+训练损失曲线显示，模型在训练早期下降较快，随后逐渐放缓，说明优化过程总体稳定，没有出现明显震荡或发散。
+
+![验证损失曲线](out/analysis/val_loss_curve.png)
+
+验证损失曲线整体缓慢下降，并在后期维持在相近水平，说明模型在验证集上的泛化表现基本稳定，没有出现特别明显的过拟合迹象。
+
+![验证 BLEU 曲线](out/analysis/val_bleu_curve.png)
+
+验证 BLEU 曲线与前文的数值分析一致，即模型在前中期提升较明显，在约第 2 个 epoch 附近达到最佳点后进入平台期，这也是最终选择 `checkpoint-1600` 作为最佳模型的重要依据。
+
+### 9.3 测试集评估结果
+
+根据 `out/eval/evaluation_results.json`，在 `754` 条测试样本上得到的平均指标如下：
+
+| 指标 | 数值 |
+|------|------|
+| BLEU | `33.4883` |
+| ROUGE-1 | `0.6448` |
+| ROUGE-2 | `0.4080` |
+| ROUGE-L | `0.5648` |
+| METEOR | `0.6085` |
+| chrF | `29.2950` |
+
+从这些结果可以看出，当前模型在测试集上已经具备较可观的句级翻译能力。BLEU 超过 `33`，说明模型输出与参考译文在 n-gram 层面已有较好的重合度；ROUGE 和 METEOR 也表明，模型在关键信息覆盖与语义保持方面整体表现较稳定。
 
 
 
+### 9.4 译文样例分析
 
+从 `log/evaluate.log` 给出的测试样例可以看出，模型在多数情况下已经能够正确把握句子主干结构和核心语义。
 
-### 12.4 增强推理脚本的交互能力
+例如：
 
-当前 `inference.py` 使用固定测试句进行演示。后续可以改为：
+- “China’s rise will continue...” 被翻译为“**中国的崛起将继续下去**...”，主干语义完整，表达自然；
+- “America is a country of immigrants...” 被翻译为“**美国是一个移民国家,经济充满活力**...”，虽然略有压缩，但关键信息保留较好；
+- “If all people conform to a particular set of beliefs...” 被翻译为“**如果所有人都遵守特定一套信念...冲突就会消失**”，句法结构和逻辑关系基本正确。
 
-- 命令行交互输入；
-- 批量文本翻译；
-- 文件输入输出；
-- Web 页面交互。
+这说明经过微调后，模型对常见新闻评论语体中的陈述句、因果句和条件句已经具备较稳定的生成能力。
 
-这将提升项目的可展示性与可用性。
+但日志中的样例也暴露出几个比较典型的问题：
 
-### 12.5 补充实验结果与可视化
+- **专有名词音译不稳定**：如 `Binyamin Netanyahu` 被译为 `Binyamin Nateh`，`Robert Solow` 被译为 `Robert Sowow`，说明模型在人名、地名、机构名上仍可能混入未充分本地化的子词结果。
+- **局部措辞偏直译**：如 “Over-diagnosis ... has costs.” 被译为“**会带来成本**”，语义并非错误，但不如参考译文“造成不良后果”自然。
+- **复杂句中局部语义易偏移**：如样本 11 中原句强调“出售方应提供担保”，模型却译成“**购买者应该提供担保**”，这类主宾角色偏移会直接影响关键信息正确性。
+- **长句压缩与重组能力仍有限**：面对插入语、破折号、括号说明较多的长句时，模型虽然大体能保持主题，但局部修饰关系有时不够精准。
 
-建议在仓库中补充：
+### 9.5 结果成因分析
 
-- 训练 loss 曲线；
-- 验证 BLEU 曲线；
-- 典型样例翻译结果；
-- 实验配置说明。
+结合训练日志与最终输出，可以把当前结果总结为“**整体可用，但距离高质量翻译仍有明显差距**”。形成这一结果的原因主要有以下几点：
 
-这样能使项目从“可运行代码仓库”进一步提升为“结果完整的实验仓库”。
+- **预训练模型提供了强先验**：MarianMT 已具备较强的英中翻译基础，因此即便只用 `8000` 条样本进行微调，仍能较快达到可观结果。
+- **数据清洗提升了有效样本质量**：清洗后保留的 `7535` 条句对整体更规整，使模型更容易收敛。
+- **训练规模仍然偏小**：对于新闻评论类长句翻译，仅依赖数千条样本微调，难以充分覆盖复杂语义现象和大量专有名词。
+- **自动指标不能完全反映译文质量**：有些句子语义大致正确但措辞不同，会被 BLEU 低估；也有些句子表面通顺，但局部事实关系已经出错。
+
+### 9.6 小结
+
+综合来看，本实验已经在当前课程项目规模下取得了较为可信的结果：模型训练过程稳定，验证集 BLEU 最好达到 `36.86`，测试集 BLEU 达到 `33.49`，并能在大量句子上生成语义基本正确、结构较完整的中文译文。与此同时，专有名词处理、复杂长句的局部对齐以及表达自然度仍然是当前系统的主要短板。这些现象与 `log/` 和 `out/` 中保存的日志、指标和样例是相互一致的，也为后续改进方向提供了直接依据。
+
+## 10. 总结
+
+本实验围绕英译中机器翻译任务，对 `TransTrans` 项目进行了系统整理。当前实验报告不再把早期手搭架构探索作为项目正式结构的一部分，而是以 MarianMT 预训练模型微调主链路作为核心展开说明。
+
+从实验实现角度看，`train.py`、`evaluate.py` 和 `inference.py` 已经构成了一条较完整的训练—评估—推理闭环；从结果组织角度看，`out/` 与 `log/` 目录为实验分析提供了直接依据，使报告能够从“介绍代码”进一步提升为“分析真实实验结果”。
+
+结合已有日志现象可以看出，当前方案虽然仍受限于数据规模和训练轮数，但已经能够满足课程实验对完整流程、结果展示和分析总结的基本要求。若后续继续扩充数据规模、补充更多指标并加强结果可视化，项目还可以进一步发展为更规范、更完整的机器翻译实验基线。
 
 ---
 
-## 13. 总结
+## 11. 项目地址
 
-本实验围绕中英机器翻译任务，对一个基于 Transformer 思想的翻译项目进行了实现分析与实验整理。项目中既包含手写的 Transformer 编码器—解码器结构，也包含基于预训练 MarianMT 模型的英译中微调链路。
-
-从实验实现角度看，当前仓库已经具备较完整的工程流程：能够完成数据加载、清洗、划分、模型训练、测试评估与单句推理。从教学角度看，项目中的手写 Transformer 模块也有助于理解位置编码、多头注意力、前馈网络和因果掩码等核心机制。
-
-需要特别指出的是，当前主实验结果来自预训练模型微调，而不是直接来自手写 Transformer 模块。因此，在报告表述中应准确区分“原理实现”和“实际运行主链路”。
-
-总体而言，本项目已经达到了课程实验的基本目标：既展示了 Transformer 的理论结构，又完成了一个可运行的英译中翻译系统验证。若后续进一步补齐手写模型训练闭环、扩展数据规模并补充完整实验结果，该项目还可以继续发展为更规范、更完整的机器翻译实验基线。
-
----
-
-## 14. 项目地址
-
-本项目已在 GitHub 开源：
+本项目已在 GitHub 上开源：
 
 `https://github.com/ChriCheng/TransTrans`
 
 ---
 
-## 15. 参考文献
+## 12. 参考文献
 
-[1] Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, Ł., & Polosukhin, I. Attention Is All You Need. *Advances in Neural Information Processing Systems*, 2017.
+[1] Vaswani, A., Shazeer, A., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, Ł., & Polosukhin, I. *Attention Is All You Need*. Advances in Neural Information Processing Systems, 2017.
 
-[2] Papineni, K., Roukos, S., Ward, T., & Zhu, W. J. BLEU: a Method for Automatic Evaluation of Machine Translation. *Proceedings of ACL*, 2002.
+[2] Papineni, K., Roukos, S., Ward, T., & Zhu, W. J. *BLEU: a Method for Automatic Evaluation of Machine Translation*. Proceedings of ACL, 2002.
 
-[3] Junczys-Dowmunt, M., Grundkiewicz, R., Dwojak, T., Hoang, H., Heafield, K., Neckermann, T., Seide, F., Germann, U., Aji, A. F., Bogoychev, N., Martins, A. F. T., & Birch, A. Marian: Fast Neural Machine Translation in C++. *Proceedings of ACL System Demonstrations*, 2018.
+[3] Junczys-Dowmunt, M., Grundkiewicz, R., Dwojak, T., Hoang, H., Heafield, K., Neckermann, T., Seide, F., Germann, U., Aji, A. F., Bogoychev, N., Martins, A. F. T., & Birch, A. *Marian: Fast Neural Machine Translation in C++*. Proceedings of ACL System Demonstrations, 2018.
+
+[4] Wolf, T., Debut, L., Sanh, V., Chaumond, J., Delangue, C., Moi, A., Cistac, P., Rault, T., Louf, R., Funtowicz, M., Davison, J., Shleifer, S., von Platen, P., Ma, C., Jernite, Y., Plu, J., Xu, C., Scao, T. L., Gugger, S., Drame, M., Lhoest, Q., & Rush, A. M. *Transformers: State-of-the-Art Natural Language Processing*. Proceedings of EMNLP: System Demonstrations, 2020.
