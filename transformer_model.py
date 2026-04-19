@@ -72,7 +72,8 @@ class MultiHeadAttention(nn.Module):
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
         
         if mask is not None:
-            scores = scores.masked_fill(mask == 0, -1e9)
+            mask = mask.to(dtype=torch.bool)
+            scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
         
         attention_weights = F.softmax(scores, dim=-1)
         attention_weights = self.dropout(attention_weights)
@@ -301,9 +302,22 @@ class TransformerTranslator(nn.Module):
         
         return output
     
-    def generate_tgt_mask(self, tgt_seq_length, device):
+    def generate_src_mask(self, src, pad_idx=0):
         """
-        生成目标序列的因果掩码，防止解码器看到未来的token
+        生成源序列 padding mask，忽略 <PAD> 位置
         """
-        mask = torch.triu(torch.ones(tgt_seq_length, tgt_seq_length, device=device), diagonal=1)
-        return (1 - mask).unsqueeze(0).unsqueeze(0)
+        return (src != pad_idx).unsqueeze(1).unsqueeze(2)
+
+    def generate_tgt_mask(self, tgt, pad_idx=0):
+        """
+        生成目标序列掩码，结合 padding mask 和因果 mask
+        """
+        batch_size, tgt_seq_length = tgt.shape
+        device = tgt.device
+
+        padding_mask = (tgt != pad_idx).unsqueeze(1).unsqueeze(2)
+        causal_mask = torch.tril(
+            torch.ones((tgt_seq_length, tgt_seq_length), device=device, dtype=torch.bool)
+        ).unsqueeze(0).unsqueeze(0)
+
+        return padding_mask & causal_mask

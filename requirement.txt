@@ -13,3 +13,5 @@ seaborn==0.13.2
 pillow==12.2.0
 tqdm==4.67.3
 requests==2.33.1
+sentencepiece==0.2.0
+accelerate==1.10.1

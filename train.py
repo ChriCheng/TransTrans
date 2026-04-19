@@ -1,238 +1,344 @@
 """
-Transformer翻译模型的训练脚本
-包含数据加载、模型训练、评估等功能
+Hugging Face 预训练翻译模型微调脚本（英 -> 中）
+默认使用 MarianMT 作为基础模型，对 WMT17 的 en->zh 数据做微调。
 """
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from transformer_model import TransformerTranslator
-import numpy as np
-from tqdm import tqdm
-import os
 import json
-PATH = 'out/'
+import os
+import random
+import re
+from dataclasses import asdict, dataclass
 
-class TranslationDataset(Dataset):
-    """
-    翻译数据集类
-    """
-    def __init__(self, src_texts, tgt_texts, src_vocab, tgt_vocab, max_length=100):
-        self.src_texts = src_texts
-        self.tgt_texts = tgt_texts
-        self.src_vocab = src_vocab
-        self.tgt_vocab = tgt_vocab
-        self.max_length = max_length
-    
-    def __len__(self):
-        return len(self.src_texts)
-    
-    def __getitem__(self, idx):
-        src_text = self.src_texts[idx]
-        tgt_text = self.tgt_texts[idx]
-        
-        # 文本转token indices
-        src_indices = self.text_to_indices(src_text, self.src_vocab)
-        tgt_indices = self.text_to_indices(tgt_text, self.tgt_vocab)
-        
+import numpy as np
+import torch
+from datasets import Dataset, load_dataset
+from datasets.utils.logging import disable_progress_bar
+from sacrebleu import corpus_bleu
+from transformers import (
+    AutoModelForSeq2SeqLM,
+    AutoTokenizer,
+    DataCollatorForSeq2Seq,
+    MarianTokenizer,
+    Seq2SeqTrainer,
+    Seq2SeqTrainingArguments,
+)
+
+PATH = "out/"
+DEFAULT_MODEL_NAME = "Helsinki-NLP/opus-mt-en-zh"
+os.makedirs(PATH, exist_ok=True)
+disable_progress_bar()
+
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def is_mostly_english(text, min_ratio=0.6):
+    text = str(text).strip()
+    if not text:
+        return False
+    ascii_letters = sum(ch.isascii() and ch.isalpha() for ch in text)
+    visible_chars = sum(not ch.isspace() for ch in text)
+    return visible_chars > 0 and (ascii_letters / visible_chars) >= min_ratio
+
+
+def looks_like_english_sentence(text):
+    text = str(text).strip().lower()
+    tokens = re.findall(r"[a-z]+(?:'[a-z]+)?", text)
+    if len(tokens) < 6:
+        return True
+
+    common_english_words = {
+        "the", "a", "an", "and", "or", "but", "if", "then", "that", "this", "these",
+        "those", "to", "of", "in", "on", "for", "from", "with", "by", "as", "at",
+        "is", "are", "was", "were", "be", "been", "being", "it", "its", "their",
+        "his", "her", "they", "we", "you", "he", "she", "not", "will", "would",
+        "can", "could", "should", "may", "might", "have", "has", "had", "do", "does",
+        "did", "than", "which", "who", "what", "when", "where", "why", "how",
+    }
+    hit_count = sum(token in common_english_words for token in tokens)
+    return hit_count >= max(1, len(tokens) // 8)
+
+
+def is_mostly_chinese(text, min_ratio=0.3):
+    text = str(text).strip()
+    if not text:
+        return False
+    zh_chars = sum("\u4e00" <= ch <= "\u9fff" for ch in text)
+    visible_chars = sum(not ch.isspace() for ch in text)
+    return visible_chars > 0 and (zh_chars / visible_chars) >= min_ratio
+
+
+def clean_parallel_texts(src_texts, tgt_texts):
+    cleaned_src = []
+    cleaned_tgt = []
+    seen = set()
+
+    for src, tgt in zip(src_texts, tgt_texts):
+        src = str(src).strip()
+        tgt = str(tgt).strip()
+
+        if not src or not tgt:
+            continue
+        if not is_mostly_english(src):
+            continue
+        if not looks_like_english_sentence(src):
+            continue
+        if not is_mostly_chinese(tgt):
+            continue
+
+        src_words = src.split()
+        tgt_chars = [ch for ch in tgt if not ch.isspace()]
+
+        if len(src_words) < 3 or len(tgt_chars) < 2:
+            continue
+        if len(src_words) > 128 or len(tgt_chars) > 160:
+            continue
+
+        ratio = len(tgt_chars) / max(len(src_words), 1)
+        if ratio < 0.5 or ratio > 8.0:
+            continue
+
+        key = (src, tgt)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        cleaned_src.append(src)
+        cleaned_tgt.append(tgt)
+
+    return cleaned_src, cleaned_tgt
+
+
+def load_wmt17_en_zh(num_examples=8000):
+    ds = load_dataset("wmt/wmt17", "zh-en", split=f"train[:{num_examples}]")
+
+    raw_src_texts = [item["translation"]["en"] for item in ds]
+    raw_tgt_texts = [item["translation"]["zh"] for item in ds]
+
+    print(f"原始样本数: {len(raw_src_texts)}")
+    src_texts, tgt_texts = clean_parallel_texts(raw_src_texts, raw_tgt_texts)
+    print(f"清洗后样本数: {len(src_texts)}")
+
+    return src_texts, tgt_texts
+
+
+def split_parallel_texts(src_texts, tgt_texts, train_ratio=0.8, val_ratio=0.1, seed=42):
+    assert len(src_texts) == len(tgt_texts), "源语言和目标语言长度不一致"
+
+    indices = list(range(len(src_texts)))
+    random.Random(seed).shuffle(indices)
+
+    src_texts = [src_texts[i] for i in indices]
+    tgt_texts = [tgt_texts[i] for i in indices]
+
+    n = len(src_texts)
+    train_end = int(n * train_ratio)
+    val_end = int(n * (train_ratio + val_ratio))
+
+    train_src = src_texts[:train_end]
+    train_tgt = tgt_texts[:train_end]
+    val_src = src_texts[train_end:val_end]
+    val_tgt = tgt_texts[train_end:val_end]
+    test_src = src_texts[val_end:]
+    test_tgt = tgt_texts[val_end:]
+
+    return train_src, train_tgt, val_src, val_tgt, test_src, test_tgt
+
+
+def save_json(obj, path):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+def load_tokenizer(model_name_or_path):
+    try:
+        return AutoTokenizer.from_pretrained(model_name_or_path, use_fast=False)
+    except Exception as exc:
+        print(f"AutoTokenizer 加载失败，回退到 MarianTokenizer: {exc}")
+        return MarianTokenizer.from_pretrained(model_name_or_path)
+
+
+def build_hf_dataset(src_texts, tgt_texts):
+    return Dataset.from_dict({"src_text": src_texts, "tgt_text": tgt_texts})
+
+
+@dataclass
+class TrainConfig:
+    model_name: str = DEFAULT_MODEL_NAME
+    num_examples: int = 8000
+    max_source_length: int = 128
+    max_target_length: int = 160
+    batch_size: int = 8
+    eval_batch_size: int = 8
+    learning_rate: float = 3e-5
+    num_train_epochs: int = 3
+    weight_decay: float = 0.01
+    warmup_ratio: float = 0.1
+    generation_max_length: int = 160
+    generation_num_beams: int = 4
+    no_repeat_ngram_size: int = 3
+    repetition_penalty: float = 1.2
+    seed: int = 42
+
+
+def preprocess_dataset(dataset, tokenizer, max_source_length, max_target_length):
+    def preprocess_batch(batch):
+        model_inputs = tokenizer(
+            batch["src_text"],
+            max_length=max_source_length,
+            truncation=True,
+        )
+
+        labels = tokenizer(
+            text_target=batch["tgt_text"],
+            max_length=max_target_length,
+            truncation=True,
+        )
+        model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
+
+    return dataset.map(
+        preprocess_batch,
+        batched=True,
+        remove_columns=dataset.column_names,
+    )
+
+
+def compute_metrics_builder(tokenizer):
+    def compute_metrics(eval_preds):
+        predictions, labels = eval_preds
+
+        if isinstance(predictions, tuple):
+            predictions = predictions[0]
+
+        decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+        decoded_preds = [pred.strip() for pred in decoded_preds]
+        decoded_labels = [label.strip() for label in decoded_labels]
+
+        bleu = corpus_bleu(decoded_preds, [decoded_labels], tokenize="zh").score
+        exact_match = float(
+            np.mean([pred == label for pred, label in zip(decoded_preds, decoded_labels)])
+        )
+
         return {
-            'src': torch.tensor(src_indices, dtype=torch.long),
-            'tgt': torch.tensor(tgt_indices, dtype=torch.long),
-            'src_text': src_text,
-            'tgt_text': tgt_text
+            "bleu": bleu,
+            "exact_match": exact_match,
         }
-    
-    def text_to_indices(self, text, vocab):
-        """将文本转换为token indices"""
-        tokens = text.lower().split()
-        indices = [vocab.get(token, vocab.get('<UNK>', 0)) for token in tokens]
-        
-        # 截断或填充到max_length
-        if len(indices) > self.max_length - 1:
-            indices = indices[:self.max_length - 1]
-        indices.append(vocab.get('<EOS>', 0))
-        
-        # 填充到max_length
-        while len(indices) < self.max_length:
-            indices.append(vocab.get('<PAD>', 0))
-        
-        return indices[:self.max_length]
+
+    return compute_metrics
 
 
-def collate_batch(batch):
-    """
-    批处理数据的整理函数
-    """
-    src_batch = []
-    tgt_batch = []
-    
-    for item in batch:
-        src_batch.append(item['src'])
-        tgt_batch.append(item['tgt'])
-    
-    src_batch = torch.stack(src_batch)
-    tgt_batch = torch.stack(tgt_batch)
-    
-    return src_batch, tgt_batch
+def train_model(config: TrainConfig):
+    print(f"加载基础模型: {config.model_name}")
+    tokenizer = load_tokenizer(config.model_name)
+    model = AutoModelForSeq2SeqLM.from_pretrained(config.model_name)
+
+    print("加载 WMT17 英->中数据...")
+    src_texts, tgt_texts = load_wmt17_en_zh(num_examples=config.num_examples)
+    print(f"总样本数: {len(src_texts)}")
+
+    train_src, train_tgt, val_src, val_tgt, test_src, test_tgt = split_parallel_texts(
+        src_texts, tgt_texts, train_ratio=0.8, val_ratio=0.1, seed=config.seed
+    )
+
+    print(f"训练集: {len(train_src)}")
+    print(f"验证集: {len(val_src)}")
+    print(f"测试集: {len(test_src)}")
+
+    train_dataset = build_hf_dataset(train_src, train_tgt)
+    val_dataset = build_hf_dataset(val_src, val_tgt)
+
+    tokenized_train = preprocess_dataset(
+        train_dataset,
+        tokenizer,
+        config.max_source_length,
+        config.max_target_length,
+    )
+    tokenized_val = preprocess_dataset(
+        val_dataset,
+        tokenizer,
+        config.max_source_length,
+        config.max_target_length,
+    )
+
+    data_collator = DataCollatorForSeq2Seq(
+        tokenizer=tokenizer,
+        model=model,
+        padding="longest",
+    )
+
+    training_args = Seq2SeqTrainingArguments(
+        output_dir=PATH,
+        per_device_train_batch_size=config.batch_size,
+        per_device_eval_batch_size=config.eval_batch_size,
+        learning_rate=config.learning_rate,
+        weight_decay=config.weight_decay,
+        num_train_epochs=config.num_train_epochs,
+        warmup_ratio=config.warmup_ratio,
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        predict_with_generate=True,
+        generation_max_length=config.generation_max_length,
+        generation_num_beams=config.generation_num_beams,
+        logging_strategy="steps",
+        logging_steps=50,
+        save_total_limit=2,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_bleu",
+        greater_is_better=True,
+        report_to=[],
+        seed=config.seed,
+        disable_tqdm=True,
+    )
+
+    trainer = Seq2SeqTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_train,
+        eval_dataset=tokenized_val,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics_builder(tokenizer),
+    )
+
+    save_json(
+        {"test_src_texts": test_src, "test_tgt_texts": test_tgt},
+        os.path.join(PATH, "test_samples.json"),
+    )
+    save_json(
+        {
+            "dataset": "wmt/wmt17",
+            "config_name": "zh-en",
+            "direction": "en->zh",
+            "num_examples": config.num_examples,
+            "train_size": len(train_src),
+            "val_size": len(val_src),
+            "test_size": len(test_src),
+        },
+        os.path.join(PATH, "split_meta.json"),
+    )
+    save_json(asdict(config), os.path.join(PATH, "config.json"))
+
+    print("\n开始微调...")
+    train_result = trainer.train()
+    trainer.save_model(PATH)
+    tokenizer.save_pretrained(PATH)
+
+    save_json(dict(train_result.metrics), os.path.join(PATH, "train_metrics.json"))
+    print("\n微调结束，最佳模型已保存。")
 
 
-def create_vocabularies(src_texts, tgt_texts, min_freq=1):
-    """
-    创建源语言和目标语言的词汇表
-    """
-    def build_vocab(texts):
-        vocab = {'<PAD>': 0, '<UNK>': 1, '<SOS>': 2, '<EOS>': 3}
-        word_freq = {}
-        
-        for text in texts:
-            tokens = text.lower().split()
-            for token in tokens:
-                word_freq[token] = word_freq.get(token, 0) + 1
-        
-        idx = 4
-        for word, freq in sorted(word_freq.items(), key=lambda x: x[1], reverse=True):
-            if freq >= min_freq:
-                vocab[word] = idx
-                idx += 1
-        
-        return vocab
-    
-    src_vocab = build_vocab(src_texts)
-    tgt_vocab = build_vocab(tgt_texts)
-    
-    return src_vocab, tgt_vocab
-
-
-def train_epoch(model, dataloader, optimizer, criterion, device):
-    """
-    训练一个epoch
-    """
-    model.train()
-    total_loss = 0
-    
-    for src_batch, tgt_batch in tqdm(dataloader, desc="Training"):
-        src_batch = src_batch.to(device)
-        tgt_batch = tgt_batch.to(device)
-        
-        # 准备输入和目标
-        tgt_input = tgt_batch[:, :-1]  # 去掉最后一个token
-        tgt_target = tgt_batch[:, 1:]  # 去掉第一个token
-        
-        # 前向传播
-        optimizer.zero_grad()
-        output = model(src_batch, tgt_input)
-        
-        # 计算损失
-        loss = criterion(output.reshape(-1, output.shape[-1]), tgt_target.reshape(-1))
-        
-        # 反向传播
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-        
-        total_loss += loss.item()
-    
-    return total_loss / len(dataloader)
-
-
-def evaluate(model, dataloader, criterion, device):
-    """
-    评估模型
-    """
-    model.eval()
-    total_loss = 0
-    
-    with torch.no_grad():
-        for src_batch, tgt_batch in tqdm(dataloader, desc="Evaluating"):
-            src_batch = src_batch.to(device)
-            tgt_batch = tgt_batch.to(device)
-            
-            tgt_input = tgt_batch[:, :-1]
-            tgt_target = tgt_batch[:, 1:]
-            
-            output = model(src_batch, tgt_input)
-            loss = criterion(output.reshape(-1, output.shape[-1]), tgt_target.reshape(-1))
-            
-            total_loss += loss.item()
-    
-    return total_loss / len(dataloader)
-
-
-def train_model(src_texts, tgt_texts, num_epochs=10, batch_size=32, learning_rate=0.0001):
-    """
-    训练翻译模型的主函数
-    """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"使用设备: {device}")
-    
-    # 创建词汇表
-    print("创建词汇表...")
-    src_vocab, tgt_vocab = create_vocabularies(src_texts, tgt_texts)
-    print(f"源语言词汇表大小: {len(src_vocab)}")
-    print(f"目标语言词汇表大小: {len(tgt_vocab)}")
-    
-    # 创建数据集和数据加载器
-    dataset = TranslationDataset(src_texts, tgt_texts, src_vocab, tgt_vocab)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_batch)
-    
-    # 初始化模型
-    model = TransformerTranslator(
-        src_vocab_size=len(src_vocab),
-        tgt_vocab_size=len(tgt_vocab),
-        d_model=256,
-        num_layers=4,
-        num_heads=8,
-        d_ff=1024,
-        dropout=0.1
-    ).to(device)
-    
-    print(f"模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
-    
-    # 定义优化器和损失函数
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = nn.CrossEntropyLoss(ignore_index=src_vocab['<PAD>'])
-    
-    # 训练循环
-    print("\n开始训练...")
-    for epoch in range(num_epochs):
-        train_loss = train_epoch(model, dataloader, optimizer, criterion, device)
-        print(f"Epoch {epoch+1}/{num_epochs}, Loss: {train_loss:.4f}")
-    
-    # 保存模型和词汇表
-    torch.save(model.state_dict(), PATH+'model.pth')
-    with open(PATH+'src_vocab.json', 'w', encoding='utf-8') as f:
-        json.dump(src_vocab, f, ensure_ascii=False)
-    with open(PATH+'tgt_vocab.json', 'w', encoding='utf-8') as f:
-        json.dump(tgt_vocab, f, ensure_ascii=False)
-    
-    print("\n模型已保存!")
-    
-    return model, src_vocab, tgt_vocab, device
+def main():
+    config = TrainConfig()
+    set_seed(config.seed)
+    train_model(config)
 
 
 if __name__ == "__main__":
-    # 示例训练数据
-    src_texts = [
-        "hello world",
-        "good morning",
-        "how are you",
-        "thank you very much",
-        "what is your name",
-        "i love machine learning",
-        "transformer is powerful",
-        "neural networks are amazing"
-    ]
-    
-    tgt_texts = [
-        "你好 世界",
-        "早上 好",
-        "你 好 吗",
-        "非常 感谢 你",
-        "你 叫 什么 名字",
-        "我 喜欢 机器 学习",
-        "transformer 很 强大",
-        "神经 网络 很 棒"
-    ]
-    
-    model, src_vocab, tgt_vocab, device = train_model(src_texts, tgt_texts, num_epochs=20, batch_size=4)
+    main()
