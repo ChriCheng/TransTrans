@@ -8,7 +8,9 @@ import os
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, MarianTokenizer
 
-PATH = "out/"
+OUT_DIR = "out"
+MODEL_DIR = os.path.join(OUT_DIR, "model")
+ANALYSIS_DIR = os.path.join(OUT_DIR, "analysis")
 
 
 def load_tokenizer(model_name_or_path):
@@ -20,7 +22,7 @@ def load_tokenizer(model_name_or_path):
 
 
 class TranslationInference:
-    def __init__(self, model_path=PATH, config_path=PATH + "config.json", device=None):
+    def __init__(self, model_path=MODEL_DIR, config_path=os.path.join(ANALYSIS_DIR, "run_config.json"), device=None):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         if os.path.exists(config_path):
@@ -61,8 +63,8 @@ class TranslationInference:
 
 
 def demo_translation():
-    if not os.path.exists(PATH):
-        print("错误: out/ 目录不存在，请先运行 train.py 进行训练")
+    if not os.path.exists(MODEL_DIR):
+        print("错误: out/model/ 目录不存在，请先运行 train.py 进行训练")
         return
 
     print("加载模型...")
