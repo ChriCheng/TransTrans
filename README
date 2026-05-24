@@ -1,138 +1,180 @@
-# 基于 Transformer 的英译中机器翻译系统
+# 基于 Transformer 的英译中机器翻译实验报告
 
-本项目实现课程作业要求的英译中机器翻译系统：输入一句英文，输出对应中文翻译。实现使用 PyTorch 与 Hugging Face `transformers`，默认基础模型为 `Helsinki-NLP/opus-mt-en-zh`。该模型是 Transformer 编码器-解码器结构的 MarianMT 翻译模型。
+本项目基于 **PyTorch** 完成英译中机器翻译实验，任务目标是输入英文句子并生成对应中文译文。实验首先使用 `torch.nn.Transformer` 自行搭建编码器-解码器结构，从随机初始化开始训练；随后使用 Hugging Face 预训练翻译模型 `Helsinki-NLP/opus-mt-en-zh` 进行微调，并将两种方案的训练效果和测试指标进行对比。
 
-## 作业要求
 
-- 任务：利用 Transformer 将输入英文句子翻译成中文。
-- 输入示例：`tom is a student .`
-- 输出示例：`汤姆 是 个 学生 。`
-- 训练集：18000 句。
-- 验证集：500 句。
-- 测试集：2636 句。
-- 实现框架：PyTorch。
 
-## 数据集
+## 1. 实验目标
 
-数据集下载地址：
+本实验主要目标如下：
 
-- 链接：`https://pan.baidu.com/s/1Vb3PvFkfCvJ_JdapgEU_Hg`
-- 提取码：`h43i`
+1. 使用 PyTorch 实现英译中机器翻译任务；
+2. 自行搭建 Transformer 编码器-解码器模型，并完成从零训练；
+3. 使用课程提供的英中文本对构造训练集、验证集和测试集；
+4. 使用 BLEU、chrF、ROUGE、METEOR 等指标评价翻译效果；
+5. 使用 MarianMT 预训练模型进行微调，并与自建模型结果对比；
+6. 保存模型、测试集、指标文件、训练日志和样例译文，保证实验可复现。
 
-下载并解压后，将数据放到项目根目录的 `data/` 文件夹下。
 
-推荐目录形式之一：
+
+## 2. 算法原理与模型结构
+
+Transformer 是机器翻译任务中常用的序列到序列模型。与传统循环神经网络不同，Transformer 主要依靠注意力机制建模序列内部依赖关系，能够并行处理输入 token，并通过多头注意力捕捉不同语义子空间中的对齐信息。
+
+本项目中自建 Transformer 采用标准编码器-解码器结构：
+
+- **源语言词嵌入**：将英文 token ID 映射为连续向量；
+- **目标语言词嵌入**：将中文 token ID 映射为连续向量；
+- **位置编码**：向模型注入词序信息；
+- **Encoder**：对英文输入序列进行上下文建模；
+- **Decoder**：结合已生成中文前缀和源句表示逐步预测下一个中文 token；
+- **线性输出层**：将解码器输出映射到中文词表空间；
+- **贪心解码**：测试阶段从 `<BOS>` 开始逐步生成，直到输出 `<EOS>` 或达到最大长度。
+
+自建模型代码位于 `train_custom.py`，默认使用随机初始化参数训练。对比实验使用的 MarianMT 模型本质上同样是 Transformer 编码器-解码器结构，但它已经在大规模英中平行语料上完成预训练，因此微调时具有更强的翻译先验。
+
+
+
+## 3. 数据集与评价指标
+
+### 3.1 数据集
+
+本项目使用课程提供的英译中平行语料。下载并解压后，将数据放入项目根目录的 `data/` 文件夹。当前实验使用的数据目录为：
+
+```text
+data/
+└── cmn-eng-simple/
+    ├── training.txt
+    ├── validation.txt
+    ├── testing.txt
+    ├── word2int_en.json
+    ├── word2int_cn.json
+    ├── int2word_en.json
+    └── int2word_cn.json
+```
+
+其中，`training.txt`、`validation.txt`、`testing.txt` 分别对应训练集、验证集和测试集。每一行是一组英文到中文的平行句对，格式如下：
+
+```text
+english sentence<TAB>中文 翻译
+```
+
+例如：
+
+```text
+he is a teacher .    他 是 老师 。
+```
+
+本实验固定使用如下数据划分：
+
+| 数据集 | 样本数 | 说明 |
+| --- | ---: | --- |
+| 训练集 | 18000 | 用于模型参数学习 |
+| 验证集 | 500 | 用于训练过程中选择最佳模型 |
+| 测试集 | 2636 | 用于最终翻译效果评估 |
+
+数据加载由 `dataload.py` 完成。脚本会递归查找 `data/` 下的课程数据目录，并自动识别 `training.txt`、`validation.txt` 和 `testing.txt`。加载时会对文本进行基础清洗，例如去除空白、合并多余空格，并还原数据中的 BPE 标记，例如将 `re@@ sted` 转成 `rested`。
+
+自建 Transformer 使用数据集中提供的词表文件：
+
+- `word2int_en.json`：英文 token 到 ID 的映射；
+- `word2int_cn.json`：中文 token 到 ID 的映射；
+- `int2word_cn.json`：中文 ID 到 token 的映射，用于生成译文解码。
+
+其中 `<PAD>`、`<BOS>`、`<EOS>`、`<UNK>` 分别用于补齐、句子开始、句子结束和未知词。MarianMT 微调链路则使用预训练模型自带 tokenizer，以保证输入输出编码方式与预训练模型一致。
+
+为了提高兼容性，`dataload.py` 也支持其他常见平行语料格式，例如 `train.en` + `train.zh`、`train.json`、`train.jsonl`、`.tsv` 和 `.csv`。如果本地没有找到课程数据，脚本会尝试使用 Hugging Face WMT17 英中数据作为兜底，便于检查代码流程；正式实验以本地课程数据集为准。
+
+### 3.2 评价指标
+
+本实验主要使用以下指标评价翻译效果：
+
+- **BLEU**：机器翻译常用指标，衡量模型译文与参考译文在 n-gram 层面的重合程度；
+- **chrF**：基于字符 n-gram 的评价指标，适合中文等分词边界不完全固定的语言；
+- **ROUGE-1 / ROUGE-2 / ROUGE-L**：分别衡量 unigram、bigram 和最长公共子序列层面的覆盖情况；
+- **METEOR**：综合考虑准确率、召回率和片段匹配情况；
+- **Exact Match**：译文与参考译文完全一致的比例。
+
+自建 Transformer 脚本会在测试集上输出 BLEU、chrF 和 Exact Match。MarianMT 微调评估脚本会额外输出 ROUGE 和 METEOR。
+
+---
+
+## 4. 项目结构
+
+当前项目结构如下：
 
 ```text
 TransTrans/
-├── data/
-│   └── cmn-eng-simple/
-│       ├── training.txt
-│       ├── validation.txt
-│       └── testing.txt
+├── dataload.py       # 课程数据集加载、格式识别和固定划分
+├── train_custom.py   # 自建 PyTorch Transformer 从零训练脚本
+├── train.py          # MarianMT 预训练模型微调训练脚本
+├── evaluate.py       # 微调模型测试集评估脚本
+├── inference.py      # 微调模型单句推理脚本
+├── environment.yml   # Conda 环境配置
+├── README            # 实验说明与结果记录
+├── data/             
+├── out_custom/       # 自建 Transformer 输出目录
+└── out/              # MarianMT 微调输出目录
 ```
 
-每行推荐使用如下格式：
+主要输出目录说明如下：
 
-```text
-english sentence<TAB>中文翻译
-```
-
-程序也兼容以下常见格式：
-
-- `train.en` + `train.zh`、`val.en` + `val.zh`、`test.en` + `test.zh`
-- `train.json`、`val.json`、`test.json`
-- `train.jsonl`、`val.jsonl`、`test.jsonl`
-- 单个包含全部句对的 `.txt`、`.tsv`、`.csv`、`.json` 或 `.jsonl` 文件
-
-如果数据已经分好训练、验证、测试文件，程序会分别截取 `18000/500/2636` 条；如果只有一个总文件，程序会按顺序切分为训练集、验证集和测试集。
-
-当前网盘数据集的实际文件名为 `training.txt`、`validation.txt`、`testing.txt`，程序会自动递归查找 `data/` 下的子目录并识别这些文件。数据中的 `@@` 子词标记会在加载时自动还原，例如 `re@@ sted` 会转成 `rested`。
-
-## 项目结构
-
-```text
-TransTrans/
-├── dataload.py       # 作业数据集加载与固定划分
-├── train.py          # Transformer 翻译模型微调训练
-├── train_custom.py   # 从零训练的 PyTorch Transformer
-├── evaluate.py       # 测试集评估
-├── inference.py      # 单句翻译推理
-├── environment.yml   # Conda 环境
-├── README            # 项目说明
-├── data/             # 数据集目录，需手动下载放入
-└── out/              # 模型、测试集、指标和分析结果，运行后生成
-```
-
-## 环境配置
-
-使用 Conda 创建环境：
-
-```bash
-conda env create -f environment.yml
-conda activate trans
-```
-
-如果只需要手动安装核心依赖，至少需要：
-
-```bash
-pip install torch transformers datasets sacrebleu sentencepiece matplotlib numpy
-```
-
-## 训练
-
-确认数据已放入 `data/` 后运行：
-
-```bash
-python train.py
-```
-
-训练脚本会执行以下步骤：
-
-1. 加载课程英译中数据集。
-2. 固定构造 `18000` 条训练样本、`500` 条验证样本、`2636` 条测试样本。
-3. 使用 MarianMT Transformer 模型进行英译中微调。
-4. 保存模型到 `out/model/`。
-5. 保存测试集到 `out/data/test_samples.json`。
-6. 保存数据划分信息到 `out/data/split_meta.json`。
-
-默认训练参数在 `train.py` 的 `TrainConfig` 中：
-
-| 参数 | 默认值 |
+| 路径 | 说明 |
 | --- | --- |
-| `model_name` | `Helsinki-NLP/opus-mt-en-zh` |
-| `data_dir` | `data` |
-| `train_size` | `18000` |
-| `val_size` | `500` |
-| `test_size` | `2636` |
-| `batch_size` | `8` |
-| `eval_batch_size` | `8` |
-| `learning_rate` | `3e-5` |
-| `num_train_epochs` | `3` |
-| `generation_num_beams` | `4` |
-| `progress_log_steps` | `50` |
+| `out_custom/custom_transformer.pt` | 自建 Transformer 最佳 checkpoint |
+| `out_custom/metrics.json` | 自建 Transformer 测试指标 |
+| `out_custom/predictions.json` | 自建 Transformer 测试集样例译文 |
+| `out/model/` | MarianMT 微调后的模型和 tokenizer |
+| `out/eval/evaluation_results.json` | MarianMT 微调模型测试指标 |
+| `out/analysis/` | 微调训练配置、训练历史和曲线图 |
 
-训练日志会额外输出总进度，例如：
+---
 
-```text
-[progress] step=500/6750 (7.41%), epoch=0.2222, speed=1.250 step/s, elapsed=6m 40s, segment_elapsed=40s
-```
 
-后台运行时可用下面的命令查看：
 
-```bash
-tail -f logs/train.log
-```
+## 5. 自建 Transformer 训练
 
-## 从零训练自建 Transformer
-
-如果不使用预训练模型，可以运行独立脚本：
+本实验首先使用自建 Transformer 从零训练。默认命令如下：
 
 ```bash
 python train_custom.py
 ```
 
-该脚本使用 `torch.nn.Transformer` 搭建编码器-解码器模型，随机初始化参数，并读取课程数据集自带的 `word2int_en.json`、`word2int_cn.json`、`int2word_cn.json` 词表。默认模型规模为 3 层、`d_model=256`、4 个注意力头，输出保存到：
+该脚本会完成以下流程：
+
+1. 加载课程英译中数据集；
+2. 加载英文和中文词表；
+3. 构造 PyTorch `Dataset` 和 `DataLoader`；
+4. 初始化 Transformer 编码器-解码器模型；
+5. 使用交叉熵损失训练模型；
+6. 每轮在验证集上计算 loss，并保存最佳 checkpoint；
+7. 训练结束后在测试集上生成译文并计算指标。
+
+GPU 上推荐运行配置如下：
+
+```bash
+python train_custom.py \
+  --train-size 18000 \
+  --val-size 500 \
+  --test-size 2636 \
+  --epochs 40 \
+  --batch-size 128 \
+  --d-model 256 \
+  --num-layers 3 \
+  --num-heads 4 \
+  --dim-feedforward 1024 \
+  --max-source-length 40 \
+  --max-target-length 50 \
+  --generation-max-length 50
+```
+
+快速检查流程可以先使用小样本：
+
+```bash
+python train_custom.py --train-size 64 --val-size 16 --test-size 16 --epochs 1 --batch-size 16 --d-model 64 --num-layers 1 --dim-feedforward 128
+```
+
+训练完成后，自建模型结果会保存到：
 
 ```text
 out_custom/
@@ -143,17 +185,58 @@ out_custom/
 └── test_samples.json
 ```
 
-快速检查流程可以先跑小样本：
+---
+
+## 6. MarianMT 微调训练
+
+在完成自建 Transformer 实验后，本项目进一步使用 `Helsinki-NLP/opus-mt-en-zh` 进行微调，用于和从零训练结果进行对比。
+
+运行命令如下：
 
 ```bash
-python train_custom.py --train-size 64 --val-size 16 --test-size 16 --epochs 1 --batch-size 16 --d-model 64 --num-layers 1 --dim-feedforward 128
+python train.py
 ```
 
-CPU 上从零训练会明显慢于微调版，效果也通常低很多；建议先用小模型确认流程，再逐步增加 `--epochs`、`--d-model` 和训练样本量。
+训练脚本会执行以下步骤：
 
-## 评估
+1. 加载课程英译中数据集；
+2. 固定构造 `18000` 条训练样本、`500` 条验证样本、`2636` 条测试样本；
+3. 加载 MarianMT 预训练模型和 tokenizer；
+4. 使用 Hugging Face `Seq2SeqTrainer` 进行微调；
+5. 根据验证集 BLEU 选择最佳模型；
+6. 保存模型、测试集、划分信息和训练过程记录。
 
-训练完成后运行：
+默认训练参数如下：
+
+| 参数 | 默认值 |
+| --- | --- |
+| `model_name` | `Helsinki-NLP/opus-mt-en-zh` |
+| `train_size` | `18000` |
+| `val_size` | `500` |
+| `test_size` | `2636` |
+| `batch_size` | `8` |
+| `eval_batch_size` | `8` |
+| `learning_rate` | `3e-5` |
+| `num_train_epochs` | `3` |
+| `generation_num_beams` | `4` |
+
+---
+
+## 7. 测试评估与推理
+
+自建 Transformer 在 `train_custom.py` 训练结束后会自动完成测试评估，指标保存到：
+
+```text
+out_custom/metrics.json
+```
+
+测试集生成样例保存到：
+
+```text
+out_custom/predictions.json
+```
+
+MarianMT 微调模型训练完成后，可以运行：
 
 ```bash
 python evaluate.py
@@ -164,30 +247,19 @@ python evaluate.py
 - 模型：`out/model/`
 - 测试集：`out/data/test_samples.json`
 
-输出指标包括：
-
-- BLEU
-- ROUGE-1
-- ROUGE-2
-- ROUGE-L
-- METEOR
-- chrF
-
 评估结果保存到：
 
 ```text
 out/eval/evaluation_results.json
 ```
 
-## 推理
-
-训练完成后运行：
+单句推理可以运行：
 
 ```bash
 python inference.py
 ```
 
-脚本会加载 `out/model/` 并对内置英文示例进行翻译。也可以在 Python 中直接调用：
+也可以在 Python 中直接调用：
 
 ```python
 from inference import TranslationInference
@@ -196,26 +268,58 @@ translator = TranslationInference()
 print(translator.translate("tom is a student ."))
 ```
 
-## 输出文件
+---
 
-```text
-out/
-├── model/                         # 微调后的模型和 tokenizer
-├── checkpoints/                   # 训练过程检查点
-├── data/
-│   ├── test_samples.json          # 测试集
-│   └── split_meta.json            # 数据集划分信息
-├── eval/
-│   └── evaluation_results.json    # 测试集评估指标
-└── analysis/
-    ├── run_config.json            # 本次训练配置
-    ├── train_metrics.json         # 训练汇总指标
-    ├── training_history.json      # 训练过程日志
-    ├── train_loss_curve.png       # 训练损失曲线
-    ├── val_loss_curve.png         # 验证损失曲线
-    └── val_bleu_curve.png         # 验证 BLEU 曲线
-```
+## 8. 实验结果记录
 
-## 说明
+当前实验结果如下：
 
-本项目默认优先读取本地 `data/` 目录中的课程数据集。若没有找到本地数据，`dataload.py` 会尝试使用 Hugging Face WMT17 英中数据作为兜底，便于检查代码流程；正式提交课程作业时应使用网盘提供的数据集。
+| 模型 | 训练方式 | 测试集样本数 | BLEU | chrF | Exact Match |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 自建 Transformer | 随机初始化，从零训练 | 2636 | 35.0831 | 31.7619 | 0.0789 |
+| MarianMT | 预训练模型微调 | 2636 | 49.5911 | 42.3557 | 未统计 |
+
+MarianMT 微调模型还计算了更多指标：
+
+| 指标 | 数值 |
+| --- | ---: |
+| ROUGE-1 | 0.7828 |
+| ROUGE-2 | 0.5709 |
+| ROUGE-L | 0.7577 |
+| METEOR | 0.7567 |
+
+从结果可以看出，自建 Transformer 在完整课程数据集上已经能够取得可用的翻译效果，BLEU 达到 `35.0831`，说明模型确实学习到了较稳定的英中对齐关系和常见句式翻译模式。但与预训练 MarianMT 微调结果相比，自建模型仍有明显差距。MarianMT 的 BLEU 达到 `49.5911`，chrF 也高于自建模型，说明大规模预训练带来的语言知识和翻译先验对小规模课程数据集非常重要。
+
+
+
+## 9. 实验结果与分析
+
+从训练过程看，自建 Transformer 的验证 loss 在前期持续下降，说明从零训练流程是有效的。随着训练轮数增加，模型逐渐能够生成结构完整的中文句子，例如能正确处理简单陈述句、常见疑问句和一部分短语搭配。但是自建模型仍然存在以下问题：
+
+- 对低频词和专有名词处理不稳定，容易生成 `<UNK>` 或语义接近但不准确的词；
+- 长句中容易出现信息遗漏、重复生成或主谓宾关系偏移；
+- 使用贪心解码时生成结果较保守，部分句子会倾向于高频表达；
+- 课程数据规模有限，从随机初始化训练时模型泛化能力仍受限制。
+
+MarianMT 微调模型的优势主要来自预训练。它在训练开始前已经学习了大量英中翻译知识，因此在相同课程数据上只需要少量 epoch 就能得到更高 BLEU 和更自然的译文。与自建模型相比，微调模型在长句结构、词汇选择和整体流畅度上更稳定。
+
+综合来看，本实验形成了比较清晰的对比结论：自建 Transformer 能够完成英译中任务，并在课程数据集上达到可展示的结果；预训练模型微调则在相同数据集上进一步显著提升翻译质量。这说明 Transformer 结构本身具备较强的序列建模能力，而预训练能够在数据规模有限时显著改善机器翻译效果。
+
+
+
+## 10. 总结
+
+本项目完成了一个完整的英译中机器翻译实验。实验先从自建 Transformer 入手，实现了词表加载、位置编码、编码器-解码器结构、训练循环、验证集选择和测试集生成评估；随后使用 MarianMT 预训练模型进行微调，并在相同数据集上完成对比。
+
+实验结果表明，自建 Transformer 在 18000 条训练样本上已经能够取得较好的基础翻译效果，但在复杂句和低频词上仍有不足。MarianMT 微调模型借助预训练知识获得了更高的 BLEU、chrF、ROUGE 和 METEOR，说明预训练模型在课程规模数据上的优势明显。项目整体实现了数据准备、模型训练、测试评估、推理展示和结果记录等完整流程，可作为 Transformer 机器翻译课程实验的提交版本。
+
+## 11. 其他
+本项目已开源 https://github.com/ChriCheng/TransTrans
+
+## 12. 参考资料
+
+1. Vaswani, A., et al. Attention Is All You Need. NeurIPS, 2017.
+2. Rush, A. The Annotated Transformer. Harvard NLP, 2018. http://nlp.seas.harvard.edu/2018/04/03/attention.html
+3. Hugging Face Transformers: https://github.com/huggingface/transformers
+4. Helsinki-NLP OPUS-MT Models: https://huggingface.co/Helsinki-NLP
+5. SacreBLEU: https://github.com/mjpost/sacrebleu
