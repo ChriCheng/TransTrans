@@ -1,349 +1,221 @@
-# 基于 Transformer 的中英翻译实验报告
+# 基于 Transformer 的英译中机器翻译系统
 
+本项目实现课程作业要求的英译中机器翻译系统：输入一句英文，输出对应中文翻译。实现使用 PyTorch 与 Hugging Face `transformers`，默认基础模型为 `Helsinki-NLP/opus-mt-en-zh`。该模型是 Transformer 编码器-解码器结构的 MarianMT 翻译模型。
 
-## 1. 实验概述
+## 作业要求
 
-本实验围绕英译中机器翻译任务，x项目最终采用的是**基于 Hugging Face 预训练 MarianMT 模型 `Helsinki-NLP/opus-mt-en-zh` 的微调方案**，并在 WMT17 英中平行语料上完成训练、评估与推理。
+- 任务：利用 Transformer 将输入英文句子翻译成中文。
+- 输入示例：`tom is a student .`
+- 输出示例：`汤姆 是 个 学生 。`
+- 训练集：18000 句。
+- 验证集：500 句。
+- 测试集：2636 句。
+- 实现框架：PyTorch。
 
-需要说明的是，我在实验初期确实尝试过手动搭建 Transformer 结构并训练，但从实际日志和结果来看，该路线在当前数据规模与训练条件下效果很差，难以作为最终展示方案。真正用于最终实验结论的，是 `train.py`、`evaluate.py` 和 `inference.py` 所构成的 MarianMT 微调主链路，MarianMT 本质上属于 Transformer 编码器—解码器翻译模型。从课程实验角度看，这种方案兼顾了 Transformer 理论基础与工程可运行性：既保留了“基于 Transformer 完成翻译任务”的实验主题，又能在有限时间和算力条件下得到较稳定、可展示的结果。
+## 数据集
 
----
+数据集下载地址：
 
-## 2. 实验目标
+- 链接：`https://pan.baidu.com/s/1Vb3PvFkfCvJ_JdapgEU_Hg`
+- 提取码：`h43i`
 
-本实验的主要目标如下：
+下载并解压后，将数据放到项目根目录的 `data/` 文件夹下。
 
-- 理解 Transformer 在机器翻译任务中的基本思想；
-- 熟悉预训练 Seq2Seq 翻译模型的微调流程；
-- 完成一个可运行的英译中训练、评估与推理闭环；
-- 观察小规模训练条件下翻译模型的收敛行为与生成效果；
-- 分析早期手搭架构路线效果不佳的原因；
-- 总结当前 MarianMT 微调主链路在课程实验中的优点与局限。
-
----
-
-## 3. 实验环境
-
-### 3.1 软件环境
-
-
-- Python 3.11
-- PyTorch 2.11.0
-- torchvision 0.26.0
-- torchaudio 2.11.0
-- transformers 5.5.1
-- tokenizers 0.22.2
-- datasets 4.8.4
-- sacrebleu 2.6.0
-- numpy 2.4.4
-- pandas 3.0.2
-- matplotlib 3.10.8
-- tqdm 4.67.3
-- sentencepiece 0.2.x
-- accelerate 1.x
-
-其余可见项目中的 `environment.yml`
-
-
-
----
-
-## 4. 项目结构
-
-结合当前实验主链路与本地实验输出，项目结构可整理为：
+推荐目录形式之一：
 
 ```text
 TransTrans/
-├── dataload.py                        # 数据加载与辅助脚本
-├── environment.yml                    # Conda 环境配置文件
-├── evaluate.py                        # 模型评估脚本
-├── inference.py                       # 单句推理脚本
-├── requirement.txt                    # Python 依赖列表
-├── train.py                           # MarianMT 微调训练脚本
-├── Transformer_Translation_Report.md  # 原始课程报告
-├── log/                               # 训练、评估等日志目录（运行后生成）
-└── out/                               # 实验输出目录（运行后生成）
-    ├── model/                         # 最终模型与 tokenizer
-    ├── checkpoints/                   # 训练中间检查点
-    ├── data/                          # 测试集样本、数据划分信息
-    ├── eval/                          # 评估结果
-    └── analysis/                      # 训练配置、历史记录、曲线图与分析文件
+├── data/
+│   └── cmn-eng-simple/
+│       ├── training.txt
+│       ├── validation.txt
+│       └── testing.txt
 ```
 
----
+每行推荐使用如下格式：
 
-## 5. 模型原理与实现
+```text
+english sentence<TAB>中文翻译
+```
 
-### 5.1 总体思路
+程序也兼容以下常见格式：
 
-当前项目实际运行的是一个**基于预训练 Transformer 翻译模型的英译中微调系统**。整体流程可以概括为：首先从 Hugging Face 的 `wmt/wmt17` 数据集中读取 `zh-en` 配置的数据，并按实验需要取其中英文作为源语言、中文作为目标语言；随后对数据进行清洗、划分和 tokenizer 编码，再将处理后的样本送入 MarianMT 进行微调训练；训练完成后，利用保存的模型与 tokenizer 对测试集进行翻译生成，并通过 BLEU 指标及样例分析评估翻译质量。
+- `train.en` + `train.zh`、`val.en` + `val.zh`、`test.en` + `test.zh`
+- `train.json`、`val.json`、`test.json`
+- `train.jsonl`、`val.jsonl`、`test.jsonl`
+- 单个包含全部句对的 `.txt`、`.tsv`、`.csv`、`.json` 或 `.jsonl` 文件
 
+如果数据已经分好训练、验证、测试文件，程序会分别截取 `18000/500/2636` 条；如果只有一个总文件，程序会按顺序切分为训练集、验证集和测试集。
 
-### 5.2 预训练 MarianMT 模型的作用
+当前网盘数据集的实际文件名为 `training.txt`、`validation.txt`、`testing.txt`，程序会自动递归查找 `data/` 下的子目录并识别这些文件。数据中的 `@@` 子词标记会在加载时自动还原，例如 `re@@ sted` 会转成 `rested`。
 
-MarianMT 属于典型的 `Seq2Seq Transformer` 翻译模型，其核心仍然是编码器—解码器结构：
+## 项目结构
 
-- **编码器**负责接收源语言输入，并提取上下文语义表示；
-- **解码器**在源句表示和已生成目标前缀的共同条件下，逐步预测下一个目标 token；
-- **自注意力与交叉注意力机制**使模型能够同时建模源句内部依赖与源目标之间的对齐关系；
-- **位置编码**用于向模型注入顺序信息；
-- **自回归生成机制**保证译文逐步生成，符合翻译任务的序列生成特征。
+```text
+TransTrans/
+├── dataload.py       # 作业数据集加载与固定划分
+├── train.py          # Transformer 翻译模型微调训练
+├── train_custom.py   # 从零训练的 PyTorch Transformer
+├── evaluate.py       # 测试集评估
+├── inference.py      # 单句翻译推理
+├── environment.yml   # Conda 环境
+├── README            # 项目说明
+├── data/             # 数据集目录，需手动下载放入
+└── out/              # 模型、测试集、指标和分析结果，运行后生成
+```
 
-与从零训练相比，预训练 MarianMT 已经在大规模平行语料上学习了较强的语言知识和翻译先验，因此在当前 8000 条样本的小规模实验中，更容易得到可观察、可展示的结果。
+## 环境配置
 
----
+使用 Conda 创建环境：
 
-## 6. 数据集与数据预处理
+```bash
+conda env create -f environment.yml
+conda activate trans
+```
 
-### 6.1 数据来源与任务方向
+如果只需要手动安装核心依赖，至少需要：
 
-项目训练数据来自 Hugging Face `datasets` 提供的 `wmt/wmt17` 数据集，配置为 `zh-en`。
+```bash
+pip install torch transformers datasets sacrebleu sentencepiece matplotlib numpy
+```
 
-**English → Chinese（英译中）**
+## 训练
 
-默认情况下，脚本从训练集前部截取 `8000` 条样本用于实验。
+确认数据已放入 `data/` 后运行：
 
-### 6.2 数据清洗策略
+```bash
+python train.py
+```
 
-为了减少噪声样本对训练的影响，项目在加载原始平行语料后会执行启发式清洗，主要包括：
+训练脚本会执行以下步骤：
 
-- 去除空样本；
-- 判断源句是否主要由英文构成；
-- 判断源句是否符合基本英文句子特征；
-- 判断目标句是否主要由中文字符构成；
-- 去除长度过短或过长的句对；
-- 去除中英文长度比例异常的句对；
-- 去除重复平行句对。
+1. 加载课程英译中数据集。
+2. 固定构造 `18000` 条训练样本、`500` 条验证样本、`2636` 条测试样本。
+3. 使用 MarianMT Transformer 模型进行英译中微调。
+4. 保存模型到 `out/model/`。
+5. 保存测试集到 `out/data/test_samples.json`。
+6. 保存数据划分信息到 `out/data/split_meta.json`。
 
+默认训练参数在 `train.py` 的 `TrainConfig` 中：
 
-
-### 6.3 数据集划分
-
-清洗完成后，样本会被随机打乱，并按照以下比例划分：
-
-- 训练集：80%
-- 验证集：10%
-- 测试集：10%
-
-测试集会单独保存到 `out/data/test_samples.json`，数据划分元信息则保存到 `out/data/split_meta.json`。
-
-### 6.4 分词与编码方式
-
-在当前主实验链路中，项目不再自行构建源语言与目标语言词表，而是直接调用 MarianMT 对应 tokenizer 完成编码。主要的长度限制为：
-
-- `max_source_length = 128`
-- `max_target_length = 160`
-
-这样做的优点在于：
-
-- 避免手工词表带来的 OOV 与管理复杂度问题；
-- 与预训练模型保持一致的文本表示方式；
-- 提高训练与推理阶段的一致性。
-
----
-
-## 7. 实验设置
-
-### 7.1 默认训练配置
-
-根据当前主训练脚本中的 `TrainConfig`，实验默认使用如下参数：
-
-| 参数 | 取值 |
-|------|------|
+| 参数 | 默认值 |
+| --- | --- |
 | `model_name` | `Helsinki-NLP/opus-mt-en-zh` |
-| `num_examples` | 8000 |
-| `max_source_length` | 128 |
-| `max_target_length` | 160 |
-| `batch_size` | 8 |
-| `eval_batch_size` | 8 |
-| `learning_rate` | 3e-5 |
-| `num_train_epochs` | 3 |
-| `weight_decay` | 0.01 |
-| `warmup_ratio` | 0.1 |
-| `generation_max_length` | 160 |
-| `generation_num_beams` | 4 |
-| `no_repeat_ngram_size` | 3 |
-| `repetition_penalty` | 1.2 |
-| `seed` | 42 |
+| `data_dir` | `data` |
+| `train_size` | `18000` |
+| `val_size` | `500` |
+| `test_size` | `2636` |
+| `batch_size` | `8` |
+| `eval_batch_size` | `8` |
+| `learning_rate` | `3e-5` |
+| `num_train_epochs` | `3` |
+| `generation_num_beams` | `4` |
+| `progress_log_steps` | `50` |
 
+训练日志会额外输出总进度，例如：
 
+```text
+[progress] step=500/6750 (7.41%), epoch=0.2222, speed=1.250 step/s, elapsed=6m 40s, segment_elapsed=40s
+```
 
-### 7.2 训练策略
+后台运行时可用下面的命令查看：
 
-当前主链路使用 Hugging Face 的 `Seq2SeqTrainer` 完成训练。训练策略主要包括：
+```bash
+tail -f logs/train.log
+```
 
-- 使用 `Seq2SeqTrainingArguments` 管理训练参数；
-- 通过验证集上的 `eval_bleu` 选择最佳模型；
-- 自动保存中间检查点；
-- 记录 loss、eval_loss、eval_bleu 等训练过程指标；
-- 训练结束后保存模型、tokenizer、训练历史和 trainer 状态。
+## 从零训练自建 Transformer
 
-### 7.3 生成策略
+如果不使用预训练模型，可以运行独立脚本：
 
-在推理与评估阶段，项目主要采用 beam search 生成，相关设置包括：
+```bash
+python train_custom.py
+```
 
-- `num_beams = 4`
-- `no_repeat_ngram_size = 3`
-- `repetition_penalty = 1.2`
-- `early_stopping = True`
+该脚本使用 `torch.nn.Transformer` 搭建编码器-解码器模型，随机初始化参数，并读取课程数据集自带的 `word2int_en.json`、`word2int_cn.json`、`int2word_cn.json` 词表。默认模型规模为 3 层、`d_model=256`、4 个注意力头，输出保存到：
 
+```text
+out_custom/
+├── custom_transformer.pt
+├── metrics.json
+├── predictions.json
+├── run_config.json
+└── test_samples.json
+```
 
+快速检查流程可以先跑小样本：
 
-### 7.4 输出目录与日志组织
+```bash
+python train_custom.py --train-size 64 --val-size 16 --test-size 16 --epochs 1 --batch-size 16 --d-model 64 --num-layers 1 --dim-feedforward 128
+```
 
-结合本地实验输出，结果文件主要被整理为如下几类：
+CPU 上从零训练会明显慢于微调版，效果也通常低很多；建议先用小模型确认流程，再逐步增加 `--epochs`、`--d-model` 和训练样本量。
 
-- `out/model/`：保存最终模型与 tokenizer；
-- `out/checkpoints/`：保存中间检查点；
-- `out/data/`：保存测试集与数据划分信息；
-- `out/eval/`：保存评估结果；
-- `out/analysis/`：保存运行配置、训练指标、训练历史、trainer 状态以及可视化曲线；
-- `log/`：保存训练日志、评估日志等文本记录。
+## 评估
 
+训练完成后运行：
 
+```bash
+python evaluate.py
+```
 
----
+评估脚本会读取：
 
-## 8. 实验流程说明
+- 模型：`out/model/`
+- 测试集：`out/data/test_samples.json`
 
-整个实验流程可概括为以下步骤：
+输出指标包括：
 
-1. 加载 MarianMT 预训练模型及其 tokenizer；
-2. 读取 WMT17 英中平行语料；
-3. 对原始平行样本执行语言检测、长度过滤、比例过滤与去重清洗；
-4. 将数据划分为训练集、验证集和测试集；
-5. 使用 tokenizer 对源句与目标句进行编码；
-6. 使用 `Seq2SeqTrainer` 执行微调训练；
-7. 保存模型、tokenizer、测试集、划分信息和训练分析文件；
-8. 调用评估脚本在测试集上生成翻译并计算 Corpus BLEU；
-9. 调用推理脚本对单句输入进行翻译展示。
+- BLEU
+- ROUGE-1
+- ROUGE-2
+- ROUGE-L
+- METEOR
+- chrF
 
+评估结果保存到：
 
+```text
+out/eval/evaluation_results.json
+```
 
----
+## 推理
 
-## 9. 实验结果与分析
+训练完成后运行：
 
-### 9.1 数据清洗与划分结果
+```bash
+python inference.py
+```
 
-从 `log/train.log` 与 `out/data/split_meta.json` 可以看到，本次实验原始截取了 `8000` 条 WMT17 英中样本，经过语言与长度规则清洗后保留 `7535` 条，约有 `5.81%` 的样本被过滤。最终数据划分为：
+脚本会加载 `out/model/` 并对内置英文示例进行翻译。也可以在 Python 中直接调用：
 
-- 训练集：`6028`
-- 验证集：`753`
-- 测试集：`754`
+```python
+from inference import TranslationInference
 
+translator = TranslationInference()
+print(translator.translate("tom is a student ."))
+```
 
-![数据长度分布](out/analysis/data_length_distribution.png)
+## 输出文件
 
-上图展示了清洗后样本的长度分布情况。可以看到，大多数样本长度集中在相对合理的区间内，极端长句和极端短句占比较低，这与前面的启发式过滤策略是吻合的，也说明送入模型的数据整体较规整。
-
-### 9.2 训练收敛情况分析
-
-根据 `log/train.log`、`out/analysis/training_history.json` 与 `out/analysis/train_metrics.json`，模型在 3 个 epoch 内整体呈现出较稳定的收敛趋势：
-
-- 训练总时长约为 `927.10s`，约 `15.45` 分钟；
-- `train_samples_per_second = 19.506`；
-- `train_steps_per_second = 2.44`；
-- 最终平均 `train_loss = 1.8784`。
-
-从阶段性指标变化看：
-
-- 训练初期 loss 约为 `2.346`，随后逐步下降到 `1.5x` 区间；
-- 验证集 `eval_loss` 从早期的 `2.1148` 下降到末期约 `2.0480`；
-- 验证集 `eval_bleu` 从 `35.45` 逐步提升到 `36+`，后期进入平台期。
-
-最佳验证结果出现在：
-
-- `epoch = 2.122`
-- `global_step = 1600`
-- `best_model_checkpoint = out/checkpoints/checkpoint-1600`
-- `best_metric (eval_bleu) = 36.8607`
-
-这说明当前设置下，模型在大约第 2 个 epoch 后已经学到主要翻译模式，后续训练仍有一定收益，但增幅已经明显变小，呈现出小规模微调中较典型的“前期提升明显、后期趋于平稳”现象。
-
-![训练损失曲线](out/analysis/train_loss_curve.png)
-
-训练损失曲线显示，模型在训练早期下降较快，随后逐渐放缓，说明优化过程总体稳定，没有出现明显震荡或发散。
-
-![验证损失曲线](out/analysis/val_loss_curve.png)
-
-验证损失曲线整体缓慢下降，并在后期维持在相近水平，说明模型在验证集上的泛化表现基本稳定，没有出现特别明显的过拟合迹象。
-
-![验证 BLEU 曲线](out/analysis/val_bleu_curve.png)
-
-验证 BLEU 曲线与前文的数值分析一致，即模型在前中期提升较明显，在约第 2 个 epoch 附近达到最佳点后进入平台期，这也是最终选择 `checkpoint-1600` 作为最佳模型的重要依据。
-
-### 9.3 测试集评估结果
-
-根据 `out/eval/evaluation_results.json`，在 `754` 条测试样本上得到的平均指标如下：
-
-| 指标 | 数值 |
-|------|------|
-| BLEU | `33.4883` |
-| ROUGE-1 | `0.6448` |
-| ROUGE-2 | `0.4080` |
-| ROUGE-L | `0.5648` |
-| METEOR | `0.6085` |
-| chrF | `29.2950` |
-
-从这些结果可以看出，当前模型在测试集上已经具备较可观的句级翻译能力。BLEU 超过 `33`，说明模型输出与参考译文在 n-gram 层面已有较好的重合度；ROUGE 和 METEOR 也表明，模型在关键信息覆盖与语义保持方面整体表现较稳定。
-
-
-
-### 9.4 译文样例分析
-
-从 `log/evaluate.log` 给出的测试样例可以看出，模型在多数情况下已经能够正确把握句子主干结构和核心语义。
-
-例如：
-
-- “China’s rise will continue...” 被翻译为“**中国的崛起将继续下去**...”，主干语义完整，表达自然；
-- “America is a country of immigrants...” 被翻译为“**美国是一个移民国家,经济充满活力**...”，虽然略有压缩，但关键信息保留较好；
-- “If all people conform to a particular set of beliefs...” 被翻译为“**如果所有人都遵守特定一套信念...冲突就会消失**”，句法结构和逻辑关系基本正确。
-
-这说明经过微调后，模型对常见新闻评论语体中的陈述句、因果句和条件句已经具备较稳定的生成能力。
-
-但日志中的样例也暴露出几个比较典型的问题：
-- **局部措辞偏直译**：如 “Over-diagnosis ... has costs.” 被译为“**会带来成本**”，语义并非错误，但不如参考译文“造成不良后果”自然。
-- **复杂句中局部语义易偏移**：如样本 11 中原句强调“出售方应提供担保”，模型却译成“**购买者应该提供担保**”，这类主宾角色偏移会直接影响关键信息正确性。
-- **长句压缩与重组能力仍有限**：面对插入语、破折号、括号说明较多的长句时，模型虽然大体能保持主题，但局部修饰关系有时不够精准。
-
-### 9.5 结果成因分析
-
-结合训练日志与最终输出，可以把当前结果总结为“**整体可用，但距离高质量翻译仍有明显差距**”。形成这一结果的原因主要有以下几点：
-
-- **预训练模型提供了强先验**：MarianMT 已具备较强的英中翻译基础，因此即便只用 `8000` 条样本进行微调，仍能较快达到可观结果。
-- **数据清洗提升了有效样本质量**：清洗后保留的 `7535` 条句对整体更规整，使模型更容易收敛。
-- **训练规模仍然偏小**：对于新闻评论类长句翻译，仅依赖数千条样本微调，难以充分覆盖复杂语义现象和大量专有名词。
-- **自动指标不能完全反映译文质量**：有些句子语义大致正确但措辞不同，会被 BLEU 低估；也有些句子表面通顺，但局部事实关系已经出错。
-
-### 9.6 小结
-
-综合来看，本实验已经在当前课程项目规模下取得了较为可信的结果：模型训练过程稳定，验证集 BLEU 最好达到 `36.86`，测试集 BLEU 达到 `33.49`，并能在大量句子上生成语义基本正确、结构较完整的中文译文。与此同时，专有名词处理、复杂长句的局部对齐以及表达自然度仍然是当前系统的主要短板。这些现象与 `log/` 和 `out/` 中保存的日志、指标和样例是相互一致的，也为后续改进方向提供了直接依据。
-
-## 10. 总结
-
-本实验围绕英译中机器翻译任务，对 `TransTrans` 项目进行了系统整理。当前实验报告不再把早期手搭架构探索作为项目正式结构的一部分，而是以 MarianMT 预训练模型微调主链路作为核心展开说明。
-
-从实验实现角度看，`train.py`、`evaluate.py` 和 `inference.py` 已经构成了一条较完整的训练—评估—推理闭环；从结果组织角度看，`out/` 与 `log/` 目录为实验分析提供了直接依据，使报告能够从“介绍代码”进一步提升为“分析真实实验结果”。
-
-结合已有日志现象可以看出，当前方案虽然仍受限于数据规模和训练轮数，但已经能够满足课程实验对完整流程、结果展示和分析总结的基本要求。若后续继续扩充数据规模、补充更多指标并加强结果可视化，项目还可以进一步发展为更规范、更完整的机器翻译实验基线。
-
----
-
-## 11. 项目地址
-
-本项目已在 GitHub 上开源：
-
-`https://github.com/ChriCheng/TransTrans`
-
----
-
-## 12. 参考文献
-
-[1] Vaswani, A., Shazeer, A., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, Ł., & Polosukhin, I. *Attention Is All You Need*. Advances in Neural Information Processing Systems, 2017.
-
-[2] Papineni, K., Roukos, S., Ward, T., & Zhu, W. J. *BLEU: a Method for Automatic Evaluation of Machine Translation*. Proceedings of ACL, 2002.
-
-[3] Junczys-Dowmunt, M., Grundkiewicz, R., Dwojak, T., Hoang, H., Heafield, K., Neckermann, T., Seide, F., Germann, U., Aji, A. F., Bogoychev, N., Martins, A. F. T., & Birch, A. *Marian: Fast Neural Machine Translation in C++*. Proceedings of ACL System Demonstrations, 2018.
-
-[4] Wolf, T., Debut, L., Sanh, V., Chaumond, J., Delangue, C., Moi, A., Cistac, P., Rault, T., Louf, R., Funtowicz, M., Davison, J., Shleifer, S., von Platen, P., Ma, C., Jernite, Y., Plu, J., Xu, C., Scao, T. L., Gugger, S., Drame, M., Lhoest, Q., & Rush, A. M. *Transformers: State-of-the-Art Natural Language Processing*. Proceedings of EMNLP: System Demonstrations, 2020.
+```text
+out/
+├── model/                         # 微调后的模型和 tokenizer
+├── checkpoints/                   # 训练过程检查点
+├── data/
+│   ├── test_samples.json          # 测试集
+│   └── split_meta.json            # 数据集划分信息
+├── eval/
+│   └── evaluation_results.json    # 测试集评估指标
+└── analysis/
+    ├── run_config.json            # 本次训练配置
+    ├── train_metrics.json         # 训练汇总指标
+    ├── training_history.json      # 训练过程日志
+    ├── train_loss_curve.png       # 训练损失曲线
+    ├── val_loss_curve.png         # 验证损失曲线
+    └── val_bleu_curve.png         # 验证 BLEU 曲线
+```
+
+## 说明
+
+本项目默认优先读取本地 `data/` 目录中的课程数据集。若没有找到本地数据，`dataload.py` 会尝试使用 Hugging Face WMT17 英中数据作为兜底，便于检查代码流程；正式提交课程作业时应使用网盘提供的数据集。

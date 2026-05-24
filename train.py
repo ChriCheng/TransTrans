@@ -1,12 +1,12 @@
 """
 Hugging Face 预训练翻译模型微调脚本（英 -> 中）
-默认使用 MarianMT 作为基础模型，对 WMT17 的 en->zh 数据做微调。
+默认使用 MarianMT 作为基础模型，对课程英译中数据集做微调。
 """
 
 import json
 import os
 import random
-import re
+import time
 from dataclasses import asdict, dataclass
 
 import matplotlib
@@ -14,7 +14,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from datasets import Dataset, load_dataset
+from dataload import load_assignment_dataset
+from datasets import Dataset
 from datasets.utils.logging import disable_progress_bar
 from sacrebleu import corpus_bleu, corpus_chrf
 from transformers import (
@@ -24,6 +25,7 @@ from transformers import (
     MarianTokenizer,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
+    TrainerCallback,
 )
 
 OUT_DIR = "out"
@@ -45,122 +47,63 @@ def set_seed(seed=42):
     torch.cuda.manual_seed_all(seed)
 
 
-def is_mostly_english(text, min_ratio=0.6):
-    text = str(text).strip()
-    if not text:
-        return False
-    ascii_letters = sum(ch.isascii() and ch.isalpha() for ch in text)
-    visible_chars = sum(not ch.isspace() for ch in text)
-    return visible_chars > 0 and (ascii_letters / visible_chars) >= min_ratio
-
-
-def looks_like_english_sentence(text):
-    text = str(text).strip().lower()
-    tokens = re.findall(r"[a-z]+(?:'[a-z]+)?", text)
-    if len(tokens) < 6:
-        return True
-
-    common_english_words = {
-        "the", "a", "an", "and", "or", "but", "if", "then", "that", "this", "these",
-        "those", "to", "of", "in", "on", "for", "from", "with", "by", "as", "at",
-        "is", "are", "was", "were", "be", "been", "being", "it", "its", "their",
-        "his", "her", "they", "we", "you", "he", "she", "not", "will", "would",
-        "can", "could", "should", "may", "might", "have", "has", "had", "do", "does",
-        "did", "than", "which", "who", "what", "when", "where", "why", "how",
-    }
-    hit_count = sum(token in common_english_words for token in tokens)
-    return hit_count >= max(1, len(tokens) // 8)
-
-
-def is_mostly_chinese(text, min_ratio=0.3):
-    text = str(text).strip()
-    if not text:
-        return False
-    zh_chars = sum("\u4e00" <= ch <= "\u9fff" for ch in text)
-    visible_chars = sum(not ch.isspace() for ch in text)
-    return visible_chars > 0 and (zh_chars / visible_chars) >= min_ratio
-
-
-def clean_parallel_texts(src_texts, tgt_texts):
-    cleaned_src = []
-    cleaned_tgt = []
-    seen = set()
-
-    for src, tgt in zip(src_texts, tgt_texts):
-        src = str(src).strip()
-        tgt = str(tgt).strip()
-
-        if not src or not tgt:
-            continue
-        if not is_mostly_english(src):
-            continue
-        if not looks_like_english_sentence(src):
-            continue
-        if not is_mostly_chinese(tgt):
-            continue
-
-        src_words = src.split()
-        tgt_chars = [ch for ch in tgt if not ch.isspace()]
-
-        if len(src_words) < 3 or len(tgt_chars) < 2:
-            continue
-        if len(src_words) > 128 or len(tgt_chars) > 160:
-            continue
-
-        ratio = len(tgt_chars) / max(len(src_words), 1)
-        if ratio < 0.5 or ratio > 8.0:
-            continue
-
-        key = (src, tgt)
-        if key in seen:
-            continue
-        seen.add(key)
-
-        cleaned_src.append(src)
-        cleaned_tgt.append(tgt)
-
-    return cleaned_src, cleaned_tgt
-
-
-def load_wmt17_en_zh(num_examples=8000):
-    ds = load_dataset("wmt/wmt17", "zh-en", split=f"train[:{num_examples}]")
-
-    raw_src_texts = [item["translation"]["en"] for item in ds]
-    raw_tgt_texts = [item["translation"]["zh"] for item in ds]
-
-    print(f"原始样本数: {len(raw_src_texts)}")
-    src_texts, tgt_texts = clean_parallel_texts(raw_src_texts, raw_tgt_texts)
-    print(f"清洗后样本数: {len(src_texts)}")
-
-    return src_texts, tgt_texts
-
-
-def split_parallel_texts(src_texts, tgt_texts, train_ratio=0.8, val_ratio=0.1, seed=42):
-    assert len(src_texts) == len(tgt_texts), "源语言和目标语言长度不一致"
-
-    indices = list(range(len(src_texts)))
-    random.Random(seed).shuffle(indices)
-
-    src_texts = [src_texts[i] for i in indices]
-    tgt_texts = [tgt_texts[i] for i in indices]
-
-    n = len(src_texts)
-    train_end = int(n * train_ratio)
-    val_end = int(n * (train_ratio + val_ratio))
-
-    train_src = src_texts[:train_end]
-    train_tgt = tgt_texts[:train_end]
-    val_src = src_texts[train_end:val_end]
-    val_tgt = tgt_texts[train_end:val_end]
-    test_src = src_texts[val_end:]
-    test_tgt = tgt_texts[val_end:]
-
-    return train_src, train_tgt, val_src, val_tgt, test_src, test_tgt
-
-
 def save_json(obj, path):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+def format_duration(seconds):
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+class ProgressEtaCallback(TrainerCallback):
+    def __init__(self, log_steps=50):
+        self.log_steps = max(1, int(log_steps))
+        self.start_time = None
+        self.last_log_time = None
+        self.last_logged_step = -1
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.start_time = time.monotonic()
+        self.last_log_time = self.start_time
+        self.last_logged_step = -1
+        total_steps = state.max_steps or 0
+        print(f"[progress] total_steps={total_steps}, logging_every={self.log_steps} steps", flush=True)
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if not self.start_time or not state.max_steps:
+            return
+        if state.global_step <= 0 or state.global_step == self.last_logged_step:
+            return
+        if state.global_step % self.log_steps != 0 and state.global_step != state.max_steps:
+            return
+
+        now = time.monotonic()
+        elapsed = now - self.start_time
+        segment_elapsed = now - self.last_log_time if self.last_log_time else elapsed
+        steps_per_second = state.global_step / elapsed if elapsed > 0 else 0.0
+        percent = state.global_step / state.max_steps * 100
+        epoch = state.epoch if state.epoch is not None else 0.0
+
+        print(
+            "[progress] "
+            f"step={state.global_step}/{state.max_steps} "
+            f"({percent:.2f}%), "
+            f"epoch={epoch:.4f}, "
+            f"speed={steps_per_second:.3f} step/s, "
+            f"elapsed={format_duration(elapsed)}, "
+            f"segment_elapsed={format_duration(segment_elapsed)}",
+            flush=True,
+        )
+        self.last_logged_step = state.global_step
+        self.last_log_time = now
 
 
 def meteor_score_zh(reference, hypothesis):
@@ -311,7 +254,10 @@ def build_hf_dataset(src_texts, tgt_texts):
 @dataclass
 class TrainConfig:
     model_name: str = DEFAULT_MODEL_NAME
-    num_examples: int = 8000
+    data_dir: str = "data"
+    train_size: int = 18000
+    val_size: int = 500
+    test_size: int = 2636
     max_source_length: int = 128
     max_target_length: int = 160
     batch_size: int = 8
@@ -324,6 +270,7 @@ class TrainConfig:
     generation_num_beams: int = 4
     no_repeat_ngram_size: int = 3
     repetition_penalty: float = 1.2
+    progress_log_steps: int = 50
     seed: int = 42
 
 
@@ -450,12 +397,12 @@ def train_model(config: TrainConfig):
     tokenizer = load_tokenizer(config.model_name)
     model = AutoModelForSeq2SeqLM.from_pretrained(config.model_name)
 
-    print("加载 WMT17 英->中数据...")
-    src_texts, tgt_texts = load_wmt17_en_zh(num_examples=config.num_examples)
-    print(f"总样本数: {len(src_texts)}")
-
-    train_src, train_tgt, val_src, val_tgt, test_src, test_tgt = split_parallel_texts(
-        src_texts, tgt_texts, train_ratio=0.8, val_ratio=0.1, seed=config.seed
+    print("加载英->中课程作业数据...")
+    train_src, train_tgt, val_src, val_tgt, test_src, test_tgt = load_assignment_dataset(
+        data_dir=config.data_dir,
+        train_size=config.train_size,
+        val_size=config.val_size,
+        test_size=config.test_size,
     )
 
     print(f"训练集: {len(train_src)}")
@@ -517,6 +464,7 @@ def train_model(config: TrainConfig):
         eval_dataset=tokenized_val,
         data_collator=data_collator,
         compute_metrics=compute_metrics_builder(tokenizer),
+        callbacks=[ProgressEtaCallback(config.progress_log_steps)],
     )
 
     save_json(
@@ -525,10 +473,12 @@ def train_model(config: TrainConfig):
     )
     save_json(
         {
-            "dataset": "wmt/wmt17",
-            "config_name": "zh-en",
+            "dataset": "coursework_en_zh",
+            "data_dir": config.data_dir,
             "direction": "en->zh",
-            "num_examples": config.num_examples,
+            "expected_train_size": config.train_size,
+            "expected_val_size": config.val_size,
+            "expected_test_size": config.test_size,
             "train_size": len(train_src),
             "val_size": len(val_src),
             "test_size": len(test_src),
